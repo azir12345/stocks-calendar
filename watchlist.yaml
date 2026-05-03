@@ -1,16 +1,70 @@
 symbols:
+  - symbol: INTC
+    name: Intel
+    tradingview: NASDAQ:INTC
+  - symbol: NVDA
+    name: NVIDIA
+    tradingview: NASDAQ:NVDA
+  - symbol: AMD
+    name: Advanced Micro Devices
+    tradingview: NASDAQ:AMD
+  - symbol: SNDK
+    name: SanDisk
+    tradingview: NASDAQ:SNDK
+  - symbol: STX
+    name: Seagate Technology
+    tradingview: NASDAQ:STX
+  - symbol: WDC
+    name: Western Digital
+    tradingview: NASDAQ:WDC
+  - symbol: HSBC
+    name: HSBC
+    tradingview: NYSE:HSBC
   - symbol: AAPL
     name: Apple
     tradingview: NASDAQ:AAPL
   - symbol: MSFT
     name: Microsoft
     tradingview: NASDAQ:MSFT
-  - symbol: NVDA
-    name: NVIDIA
-    tradingview: NASDAQ:NVDA
   - symbol: TSLA
     name: Tesla
     tradingview: NASDAQ:TSLA
+  - symbol: GOOG
+    name: Alphabet
+    tradingview: NASDAQ:GOOG
+  - symbol: IBKR
+    name: Interactive Brokers
+    tradingview: NASDAQ:IBKR
+  - symbol: META
+    name: Meta Platforms
+    tradingview: NASDAQ:META
+  - symbol: TSM
+    name: Taiwan Semiconductor Manufacturing
+    tradingview: NYSE:TSM
+  - symbol: AVGO
+    name: Broadcom
+    tradingview: NASDAQ:AVGO
+  - symbol: QCOM
+    name: Qualcomm
+    tradingview: NASDAQ:QCOM
+  - symbol: ARM
+    name: Arm Holdings
+    tradingview: NASDAQ:ARM
+  - symbol: DELL
+    name: Dell Technologies
+    tradingview: NYSE:DELL
+  - symbol: MU
+    name: Micron Technology
+    tradingview: NASDAQ:MU
+  - symbol: GM
+    name: General Motors
+    tradingview: NYSE:GM
+  - symbol: GE
+    name: GE Aerospace
+    tradingview: NYSE:GE
+  - symbol: IBM
+    name: IBM
+    tradingview: NYSE:IBM
   - symbol: AMZN
     name: Amazon
     tradingview: NASDAQ:AMZN

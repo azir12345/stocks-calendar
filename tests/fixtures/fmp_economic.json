@@ -1,0 +1,26 @@
+[
+  {
+    "date": "2026-05-12 12:30:00",
+    "country": "US",
+    "event": "Core CPI MoM",
+    "previous": "0.3%",
+    "estimate": "0.2%",
+    "actual": ""
+  },
+  {
+    "date": "2026-05-15 12:30:00",
+    "country": "US",
+    "event": "Retail Sales MoM",
+    "previous": "-0.1%",
+    "estimate": "0.4%",
+    "actual": ""
+  },
+  {
+    "date": "2026-05-16 08:30:00",
+    "country": "US",
+    "event": "Low Impact Regional Survey",
+    "previous": "1",
+    "estimate": "2",
+    "actual": ""
+  }
+]

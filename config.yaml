@@ -1,6 +1,6 @@
 calendar:
-  name: US Earnings Watchlist
-  description: Rolling 30-day earnings calendar for the configured US stock watchlist.
+  name: US Market Watchlist
+  description: Rolling 30-day earnings and market-events calendar for the configured watchlist.
   timezone: America/New_York
   window_days: 30
   timed_event_minutes: 30
@@ -17,5 +17,15 @@ links:
 
 financial_events:
   enabled: true
+  economic_calendar:
+    enabled: true
+    provider: fmp
+  market_holidays:
+    enabled: true
+    exchanges:
+      - NASDAQ
+      - NYSE
+  witching_days:
+    enabled: true
   files:
     - events/manual_events.yaml

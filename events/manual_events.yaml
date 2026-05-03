@@ -1,14 +1,13 @@
-# Reserved for future non-earnings events, such as FOMC meetings.
+# Manual non-earnings events that are not reliably available from the economic API.
 # Keep this file public-safe: GitHub Pages will publish the generated calendar.
 events: []
 
 # Example:
 # events:
-#   - id: fomc-2026-06
-#     title: FOMC Rate Decision
-#     date: 2026-06-17
-#     time: "14:00"
+#   - id: nvidia-gtc-2026
+#     title: NVIDIA GTC
+#     category: tech_event
+#     date: 2026-03-16
 #     timezone: America/New_York
-#     duration_minutes: 60
-#     description: Federal Reserve interest-rate decision.
-#     url: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+#     description: NVIDIA annual AI and developer conference.
+#     url: https://www.nvidia.com/gtc/

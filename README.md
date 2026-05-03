@@ -1,6 +1,6 @@
 # stocks-calendar
 
-Generate a rolling 30-day iCalendar feed for US stock earnings.
+Generate a rolling 30-day iCalendar feed for US stock earnings and key market events.
 
 The feed is built for iOS Calendar subscriptions through GitHub Pages. Update `watchlist.yaml`, set an FMP API key in GitHub Secrets, and GitHub Actions publishes `public/earnings.ics` once per day.
 
@@ -24,10 +24,11 @@ On iPhone:
 
 ## Data Source
 
-This project uses Financial Modeling Prep's earnings calendar endpoint:
+This project uses Financial Modeling Prep's earnings and economic calendar endpoints:
 
 ```text
 https://financialmodelingprep.com/stable/earnings-calendar
+https://financialmodelingprep.com/stable/economic-calendar
 ```
 
 Create an API key at Financial Modeling Prep, then add it to the GitHub repository:
@@ -83,21 +84,45 @@ Apple (AAPL) 财报 - 盘后
 
 ## Financial Events
 
-Future non-earnings events are reserved in `events/manual_events.yaml`.
+The calendar includes:
+
+- FOMC rate decisions
+- FOMC meeting minutes
+- CPI
+- PPI
+- Nonfarm payrolls and related labor data
+- GDP
+- PCE/Core PCE
+- Retail sales
+- ISM manufacturing PMI
+- ISM services PMI
+- Initial jobless claims
+- Federal Reserve speeches when the economic calendar source includes them
+- Treasury auctions when the economic calendar source includes them
+- EIA crude oil inventory
+- OPEC/OPEC+ events when the economic calendar source or manual events include them
+- US market holidays
+- US quarterly witching days
+- Manual company/technology events
+
+Each event description includes affected assets, expected direction when previous/estimate values are available, high-vs-low surprise logic, and watchlist tickers most likely to react.
+
+Manual non-earnings events live in `events/manual_events.yaml`.
 
 Example:
 
 ```yaml
 events:
-  - id: fomc-2026-06
-    title: FOMC Rate Decision
-    date: 2026-06-17
-    time: "14:00"
+  - id: nvidia-gtc-2026
+    title: NVIDIA GTC
+    category: tech_event
+    date: 2026-03-16
     timezone: America/New_York
-    duration_minutes: 60
-    description: Federal Reserve interest-rate decision.
-    url: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+    description: NVIDIA annual AI and developer conference.
+    url: https://www.nvidia.com/gtc/
 ```
+
+Supported manual categories include `tech_event`, `company_event`, and internal economic categories such as `opec`, `fed_speech`, `treasury_auction`, or `fomc_rate`.
 
 These events are included in the same `earnings.ics` feed.
 
@@ -118,7 +143,7 @@ python -m unittest discover -s tests
 Generate with a fixture:
 
 ```bash
-python scripts/generate_calendar.py --fixture tests/fixtures/fmp_earnings.json
+python scripts/generate_calendar.py --fixture tests/fixtures/fmp_earnings.json --skip-auto-financial-events
 ```
 
 Generate with the real provider:

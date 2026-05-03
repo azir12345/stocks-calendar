@@ -1,10 +1,12 @@
 import datetime as dt
 import unittest
+import json
 from pathlib import Path
 
 from scripts.generate_calendar import (
     WatchSymbol,
     build_earnings_events,
+    build_economic_events,
     load_earnings_rows,
     render_ics,
 )
@@ -89,6 +91,19 @@ class GenerateCalendarTests(unittest.TestCase):
 
         self.assertIn("DTSTART;TZID=America/New_York:20260512T160500", ics)
         self.assertIn("TRIGGER:-P1D", ics)
+
+    def test_economic_events_include_impact_logic_and_expected_direction(self):
+        rows = json.loads((ROOT / "tests/fixtures/fmp_economic.json").read_text(encoding="utf-8"))
+        events = build_economic_events(rows, timezone="America/New_York", reminder_days=1)
+
+        self.assertEqual(2, len(events))
+        self.assertEqual("美国 CPI - 高影响", events[0].title)
+        self.assertEqual(dt.time(8, 30), events[0].start.time())
+        self.assertIn("预计方向: 预计降低", events[0].description)
+        self.assertIn("如果高于预期:", events[0].description)
+        self.assertIn("重点影响股票:", events[0].description)
+        self.assertIn("美国零售销售 - 中到高影响", events[1].title)
+        self.assertIn("预计方向: 预计升高", events[1].description)
 
 
 if __name__ == "__main__":
