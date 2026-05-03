@@ -20,6 +20,8 @@ financial_events:
   economic_calendar:
     enabled: true
     provider: fmp
+    countries:
+      - US
   market_holidays:
     enabled: true
     exchanges:

@@ -553,7 +553,8 @@ def load_auto_financial_events(
     economic_config = financial_config.get("economic_calendar", {})
     if economic_config.get("enabled", False):
         rows = load_fmp_economic_rows(start_date=start_date, end_date=end_date)
-        events.extend(build_economic_events(rows, timezone, reminder_days))
+        countries = tuple(str(item).upper() for item in economic_config.get("countries", ["US"]))
+        events.extend(build_economic_events(rows, timezone, reminder_days, countries=countries))
 
     holidays_config = financial_config.get("market_holidays", {})
     if holidays_config.get("enabled", False):
@@ -592,9 +593,17 @@ def load_json_url(url: str) -> Any:
     return json.loads(payload)
 
 
-def build_economic_events(rows: list[dict[str, Any]], timezone: str, reminder_days: int) -> list[CalendarEvent]:
+def build_economic_events(
+    rows: list[dict[str, Any]],
+    timezone: str,
+    reminder_days: int,
+    countries: tuple[str, ...] = ("US",),
+) -> list[CalendarEvent]:
     events: list[CalendarEvent] = []
     for row in rows:
+        country = str(first_existing(row, ("country", "region")) or "").upper()
+        if countries and country and country not in countries:
+            continue
         rule = classify_economic_row(row)
         if rule is None:
             continue
