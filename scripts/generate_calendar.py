@@ -110,7 +110,7 @@ ECONOMIC_EVENT_RULES: tuple[dict[str, Any], ...] = (
     },
     {
         "category": "ism_manufacturing",
-        "title": "ISM 制造业 PMI",
+        "title": "美国制造业 PMI",
         "importance": "中到高",
         "keywords": ("ism manufacturing", "manufacturing pmi"),
         "impact_objects": "制造业、半导体、工业股、美元、美债收益率",
@@ -120,7 +120,7 @@ ECONOMIC_EVENT_RULES: tuple[dict[str, Any], ...] = (
     },
     {
         "category": "ism_services",
-        "title": "ISM 服务业 PMI",
+        "title": "美国服务业 PMI",
         "importance": "中到高",
         "keywords": ("ism services", "ism non-manufacturing", "services pmi", "non-manufacturing pmi"),
         "impact_objects": "服务业、软件、广告、电商、整体风险偏好",
@@ -639,8 +639,17 @@ def build_economic_events(
 def classify_economic_row(row: dict[str, Any]) -> dict[str, Any] | None:
     name = event_name(row).lower()
     normalized = f" {name} "
+    if "non-manufacturing" in normalized or "services pmi" in normalized:
+        return rule_by_category("ism_services")
     for rule in ECONOMIC_EVENT_RULES:
         if any(keyword in normalized for keyword in rule["keywords"]):
+            return rule
+    return None
+
+
+def rule_by_category(category: str) -> dict[str, Any] | None:
+    for rule in ECONOMIC_EVENT_RULES:
+        if rule["category"] == category:
             return rule
     return None
 
