@@ -103,7 +103,10 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertIn("如果高于预期:", events[0].description)
         self.assertIn("重点影响股票:", events[0].description)
         self.assertIn("美国服务业 PMI - 中到高影响", events[1].title)
-        self.assertIn("预计方向: 预计降低", events[1].description)
+        self.assertIn("合并分项数量: 2", events[1].description)
+        self.assertIn("ISM Services PMI", events[1].description)
+        self.assertIn("ISM Services Prices", events[1].description)
+        self.assertIn("分项方向分化", events[1].description)
 
 
 if __name__ == "__main__":

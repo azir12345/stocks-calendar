@@ -599,7 +599,7 @@ def build_economic_events(
     reminder_days: int,
     countries: tuple[str, ...] = ("US",),
 ) -> list[CalendarEvent]:
-    events: list[CalendarEvent] = []
+    grouped_rows: dict[tuple[str, str, str, bool, str], dict[str, Any]] = {}
     for row in rows:
         country = str(first_existing(row, ("country", "region")) or "").upper()
         if countries and country and country not in countries:
@@ -619,21 +619,52 @@ def build_economic_events(
             start = dt.datetime.combine(event_date, event_time, tzinfo=ZoneInfo(timezone))
             end = start + dt.timedelta(minutes=30)
             all_day = False
-        description = build_economic_description(row, rule)
+        group_key = (str(rule["category"]), event_start_key(start), event_end_key(end), all_day, country or "US")
+        group = grouped_rows.setdefault(
+            group_key,
+            {
+                "rule": rule,
+                "title": title,
+                "start": start,
+                "end": end,
+                "all_day": all_day,
+                "timezone": timezone,
+                "country": country or "US",
+                "rows": [],
+            },
+        )
+        group["rows"].append(row)
+
+    events: list[CalendarEvent] = []
+    for group in grouped_rows.values():
+        rule = group["rule"]
+        description = build_grouped_economic_description(group["rows"], rule, group["country"])
         events.append(
             CalendarEvent(
-                uid=make_uid("economic", str(rule["category"]), event_name(row), event_date.isoformat()),
-                title=title,
-                start=start,
-                end=end,
-                all_day=all_day,
-                timezone=timezone,
+                uid=make_uid("economic", str(rule["category"]), event_start_key(group["start"]), group["country"]),
+                title=group["title"],
+                start=group["start"],
+                end=group["end"],
+                all_day=group["all_day"],
+                timezone=group["timezone"],
                 description=description,
                 url="https://site.financialmodelingprep.com/developer/docs/economic-calendar-api/?direct=true",
                 reminder_days_before=reminder_days,
             )
         )
-    return events
+    return sorted(events, key=event_sort_key)
+
+
+def event_start_key(value: dt.date | dt.datetime) -> str:
+    if isinstance(value, dt.datetime):
+        return value.isoformat()
+    return value.isoformat()
+
+
+def event_end_key(value: dt.date | dt.datetime) -> str:
+    if isinstance(value, dt.datetime):
+        return value.isoformat()
+    return value.isoformat()
 
 
 def classify_economic_row(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -723,6 +754,82 @@ def build_economic_description(row: dict[str, Any], rule: dict[str, Any]) -> str
         "数据来源: Financial Modeling Prep Economic Calendar",
     ]
     return "\n".join(lines)
+
+
+def build_grouped_economic_description(rows: list[dict[str, Any]], rule: dict[str, Any], country: str) -> str:
+    first_row = rows[0]
+    aggregate_direction = summarize_group_direction(rows)
+
+    lines = [
+        f"分类: {rule['title']}",
+        f"国家/地区: {country}",
+        f"重要性: {rule['importance']}",
+        "",
+        "影响对象:",
+        str(rule["impact_objects"]),
+        "",
+        "本次分项:",
+    ]
+    for row in rows:
+        previous = first_existing(row, ("previous", "prev"))
+        estimate = first_existing(row, ("estimate", "consensus", "forecast"))
+        actual = first_existing(row, ("actual",))
+        direction = describe_expected_direction(previous, estimate)
+        lines.append(
+            f"- {event_name(row)} | 上次: {format_value(previous)} | 市场预期: {format_value(estimate)} | 实际: {format_value(actual)} | 预计方向: {direction}"
+        )
+
+    lines.extend(
+        [
+            "",
+            "汇总判断:",
+            f"预计方向: {aggregate_direction}",
+            "",
+            "影响逻辑:",
+            f"如果高于预期: {rule['higher']}",
+            f"如果低于预期: {rule['lower']}",
+            "",
+            "重点影响股票:",
+            str(rule["focus"]),
+            "",
+            "说明:",
+            "该影响说明是规则化解读，不是投资建议；实际行情还要看核心分项、修正值、利率和市场仓位。",
+            f"合并分项数量: {len(rows)}",
+            "数据来源: Financial Modeling Prep Economic Calendar",
+        ]
+    )
+    source_url = first_existing(first_row, ("url", "sourceUrl"))
+    if source_url:
+        lines.append(f"Source: {source_url}")
+    return "\n".join(lines)
+
+
+def summarize_group_direction(rows: list[dict[str, Any]]) -> str:
+    counts = {"up": 0, "down": 0, "flat": 0, "unknown": 0}
+    for row in rows:
+        previous = first_existing(row, ("previous", "prev"))
+        estimate = first_existing(row, ("estimate", "consensus", "forecast"))
+        previous_number = parse_number(previous)
+        estimate_number = parse_number(estimate)
+        if previous_number is None or estimate_number is None:
+            counts["unknown"] += 1
+        elif estimate_number > previous_number:
+            counts["up"] += 1
+        elif estimate_number < previous_number:
+            counts["down"] += 1
+        else:
+            counts["flat"] += 1
+
+    known = counts["up"] + counts["down"] + counts["flat"]
+    if known == 0:
+        return "暂无一致预期或缺少可比上次值"
+    if counts["up"] > counts["down"] and counts["up"] >= counts["flat"]:
+        return f"多数分项预计升高（升高 {counts['up']}，降低 {counts['down']}，持平 {counts['flat']}，未知 {counts['unknown']}）"
+    if counts["down"] > counts["up"] and counts["down"] >= counts["flat"]:
+        return f"多数分项预计降低（升高 {counts['up']}，降低 {counts['down']}，持平 {counts['flat']}，未知 {counts['unknown']}）"
+    if counts["flat"] >= counts["up"] and counts["flat"] >= counts["down"]:
+        return f"多数分项预计持平（升高 {counts['up']}，降低 {counts['down']}，持平 {counts['flat']}，未知 {counts['unknown']}）"
+    return f"分项方向分化（升高 {counts['up']}，降低 {counts['down']}，持平 {counts['flat']}，未知 {counts['unknown']}）"
 
 
 def describe_expected_direction(previous: Any, estimate: Any) -> str:
