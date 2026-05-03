@@ -180,6 +180,31 @@ ECONOMIC_EVENT_RULES: tuple[dict[str, Any], ...] = (
     },
 )
 
+CATEGORY_OFFICIAL_URLS = {
+    "fomc_rate": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
+    "fomc_minutes": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
+    "cpi": "https://www.bls.gov/cpi/",
+    "ppi": "https://www.bls.gov/ppi/",
+    "nfp": "https://www.bls.gov/news.release/empsit.toc.htm",
+    "gdp": "https://www.bea.gov/products/gross-domestic-product-gdp",
+    "pce": "https://www.bea.gov/data/personal-consumption-expenditures-price-index",
+    "retail_sales": "https://www.census.gov/retail/index.html",
+    "ism_manufacturing": "https://www.ismworld.org/supply-management-news-and-reports/reports/ism-pmi-reports/",
+    "ism_services": "https://www.ismworld.org/supply-management-news-and-reports/reports/ism-pmi-reports/",
+    "jobless_claims": "https://www.dol.gov/agencies/eta/ui-data",
+    "fed_speech": "https://www.federalreserve.gov/newsevents/speeches.htm",
+    "treasury_auction": "https://treasurydirect.gov/auctions/upcoming/",
+    "oil_inventory": "https://www.eia.gov/petroleum/supply/weekly/",
+    "opec": "https://www.opec.org/opec_web/en/press_room/28.htm",
+}
+
+EXCHANGE_HOLIDAY_URLS = {
+    "NASDAQ": "https://www.nasdaq.com/market-activity/stock-market-holiday-schedule",
+    "NYSE": "https://www.nyse.com/markets/hours-calendars",
+}
+
+WITCHING_OFFICIAL_URL = "https://www.theocc.com/webapps/weekly-options"
+
 
 @dataclass(frozen=True)
 class WatchSymbol:
@@ -498,7 +523,9 @@ def build_earnings_description(
     session_label: str,
     links_config: dict[str, Any],
 ) -> tuple[str, str | None]:
-    lines = [f"Ticker: {symbol}", f"财报时间: {session_label}"]
+    tradingview_url = tradingview_link(watch_item, symbol)
+    apple_stocks_url = f"stocks://?symbol={urllib.parse.quote(symbol)}"
+    lines = [f"Apple Stocks: {apple_stocks_url}", f"Ticker: {symbol}", f"财报时间: {session_label}"]
 
     eps = first_existing(row, ("epsEstimated", "epsEstimate", "epsConsensus"))
     revenue = first_existing(row, ("revenueEstimated", "revenueEstimate", "revenueConsensus"))
@@ -507,15 +534,11 @@ def build_earnings_description(
     if revenue is not None:
         lines.append(f"营收预期: {revenue}")
 
-    tradingview_url = tradingview_link(watch_item, symbol)
-    apple_stocks_url = f"stocks://?symbol={urllib.parse.quote(symbol)}"
     primary_url: str | None = None
 
     if links_config.get("include_tradingview", True):
         lines.append(f"TradingView: {tradingview_url}")
         primary_url = tradingview_url
-    if links_config.get("include_apple_stocks", True):
-        lines.append(f"Apple Stocks: {apple_stocks_url}")
 
     source_url = first_existing(row, ("url", "sourceUrl"))
     if source_url:
@@ -648,7 +671,7 @@ def build_economic_events(
                 all_day=group["all_day"],
                 timezone=group["timezone"],
                 description=description,
-                url="https://site.financialmodelingprep.com/developer/docs/economic-calendar-api/?direct=true",
+                url=official_url_for_category(str(rule["category"])),
                 reminder_days_before=reminder_days,
             )
         )
@@ -665,6 +688,10 @@ def event_end_key(value: dt.date | dt.datetime) -> str:
     if isinstance(value, dt.datetime):
         return value.isoformat()
     return value.isoformat()
+
+
+def official_url_for_category(category: str) -> str:
+    return CATEGORY_OFFICIAL_URLS.get(category, "https://www.usa.gov/statistics")
 
 
 def classify_economic_row(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -751,6 +778,7 @@ def build_economic_description(row: dict[str, Any], rule: dict[str, Any]) -> str
         "",
         "说明:",
         "该影响说明是规则化解读，不是投资建议；实际行情还要看核心分项、修正值、利率和市场仓位。",
+        f"官方页面: {official_url_for_category(str(rule['category']))}",
         "数据来源: Financial Modeling Prep Economic Calendar",
     ]
     return "\n".join(lines)
@@ -795,6 +823,7 @@ def build_grouped_economic_description(rows: list[dict[str, Any]], rule: dict[st
             "说明:",
             "该影响说明是规则化解读，不是投资建议；实际行情还要看核心分项、修正值、利率和市场仓位。",
             f"合并分项数量: {len(rows)}",
+            f"官方页面: {official_url_for_category(str(rule['category']))}",
             "数据来源: Financial Modeling Prep Economic Calendar",
         ]
     )
@@ -888,6 +917,7 @@ def load_market_holiday_events(
                 continue
             name = first_existing(row, ("name", "holiday", "event")) or "Market Holiday"
             title = f"美股休市 - {name}"
+            official_url = EXCHANGE_HOLIDAY_URLS.get(exchange, "https://www.nyse.com/markets/hours-calendars")
             description = "\n".join(
                 [
                     f"事件: 美股休市",
@@ -904,6 +934,7 @@ def load_market_holiday_events(
                     "相关关注股:",
                     WATCHLIST_TEXT,
                     "",
+                    f"官方页面: {official_url}",
                     "数据来源: Financial Modeling Prep Market Holidays",
                 ]
             )
@@ -916,7 +947,7 @@ def load_market_holiday_events(
                     all_day=True,
                     timezone=timezone,
                     description=description,
-                    url="https://site.financialmodelingprep.com/developer/docs",
+                    url=official_url,
                     reminder_days_before=reminder_days,
                 )
             )
@@ -949,6 +980,8 @@ def build_witching_events(
                     "",
                     "重点影响股票:",
                     WATCHLIST_TEXT,
+                    "",
+                    f"官方页面: {WITCHING_OFFICIAL_URL}",
                 ]
             )
             events.append(
@@ -960,7 +993,7 @@ def build_witching_events(
                     all_day=True,
                     timezone=timezone,
                     description=description,
-                    url=None,
+                    url=WITCHING_OFFICIAL_URL,
                     reminder_days_before=reminder_days,
                 )
             )
@@ -1016,10 +1049,15 @@ def build_manual_event(item: dict[str, Any], default_timezone: str, reminder_day
     description = str(item.get("description", "")).strip()
     category = as_optional_str(item.get("category"))
     url = as_optional_str(item.get("url"))
+    normalized_category = category.lower() if category else None
+    if normalized_category in ("tech_event", "company_event") and not url:
+        raise ValueError(f"Manual event '{title}' must include an official event URL")
+    if category and not url:
+        url = official_url_for_category(normalized_category or category)
     if category:
         description = enrich_manual_description(title, category, description)
     if url:
-        description = f"{description}\n{url}".strip()
+        description = f"{description}\n官方页面: {url}".strip()
 
     if event_time is None:
         start: dt.date | dt.datetime = event_date

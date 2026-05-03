@@ -46,6 +46,8 @@ class GenerateCalendarTests(unittest.TestCase):
 
         self.assertTrue(events[0].all_day)
         self.assertEqual("Apple (AAPL) 财报 - 盘后", events[0].title)
+        self.assertTrue(events[0].description.startswith("Apple Stocks: stocks://?symbol=AAPL"))
+        self.assertEqual("https://www.tradingview.com/symbols/NASDAQ-AAPL/", events[0].url)
         self.assertIn("TradingView: https://www.tradingview.com/symbols/NASDAQ-AAPL/", events[0].description)
         self.assertIn("Apple Stocks: stocks://?symbol=AAPL", events[0].description)
 
@@ -99,6 +101,8 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertEqual(2, len(events))
         self.assertEqual("美国 CPI - 高影响", events[0].title)
         self.assertEqual(dt.time(8, 30), events[0].start.time())
+        self.assertEqual("https://www.bls.gov/cpi/", events[0].url)
+        self.assertIn("官方页面: https://www.bls.gov/cpi/", events[0].description)
         self.assertIn("预计方向: 预计降低", events[0].description)
         self.assertIn("如果高于预期:", events[0].description)
         self.assertIn("重点影响股票:", events[0].description)

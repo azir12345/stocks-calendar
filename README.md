@@ -107,6 +107,8 @@ The calendar includes:
 
 Each event description includes affected assets, expected direction when previous/estimate values are available, high-vs-low surprise logic, and watchlist tickers most likely to react.
 
+Calendar event URLs point to official source pages for macro events and meetings. Earnings event URLs point to TradingView, with the Apple Stocks URL scheme placed at the top of the event description. Manual company/technology events must include their official event page URL.
+
 Manual non-earnings events live in `events/manual_events.yaml`.
 
 Example:
