@@ -1,0 +1,16 @@
+symbols:
+  - symbol: AAPL
+    name: Apple
+    tradingview: NASDAQ:AAPL
+  - symbol: MSFT
+    name: Microsoft
+    tradingview: NASDAQ:MSFT
+  - symbol: NVDA
+    name: NVIDIA
+    tradingview: NASDAQ:NVDA
+  - symbol: TSLA
+    name: Tesla
+    tradingview: NASDAQ:TSLA
+  - symbol: AMZN
+    name: Amazon
+    tradingview: NASDAQ:AMZN

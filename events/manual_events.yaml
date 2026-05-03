@@ -1,0 +1,14 @@
+# Reserved for future non-earnings events, such as FOMC meetings.
+# Keep this file public-safe: GitHub Pages will publish the generated calendar.
+events: []
+
+# Example:
+# events:
+#   - id: fomc-2026-06
+#     title: FOMC Rate Decision
+#     date: 2026-06-17
+#     time: "14:00"
+#     timezone: America/New_York
+#     duration_minutes: 60
+#     description: Federal Reserve interest-rate decision.
+#     url: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm

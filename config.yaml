@@ -1,0 +1,21 @@
+calendar:
+  name: US Earnings Watchlist
+  description: Rolling 30-day earnings calendar for the configured US stock watchlist.
+  timezone: America/New_York
+  window_days: 30
+  timed_event_minutes: 30
+  reminder_days_before: 1
+  output_path: public/earnings.ics
+
+earnings:
+  provider: fmp
+  require_confirmed_only: false
+
+links:
+  include_tradingview: true
+  include_apple_stocks: true
+
+financial_events:
+  enabled: true
+  files:
+    - events/manual_events.yaml

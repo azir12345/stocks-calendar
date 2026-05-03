@@ -1,0 +1,20 @@
+[
+  {
+    "symbol": "AAPL",
+    "date": "2026-05-08",
+    "time": "amc",
+    "epsEstimated": 1.51,
+    "revenueEstimated": 94500000000
+  },
+  {
+    "symbol": "MSFT",
+    "date": "2026-05-12T16:05:00-04:00",
+    "time": "16:05",
+    "epsEstimated": 3.21
+  },
+  {
+    "symbol": "META",
+    "date": "2026-05-15",
+    "time": "bmo"
+  }
+]
