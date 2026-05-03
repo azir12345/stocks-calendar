@@ -644,6 +644,8 @@ def build_economic_events(
         rule = classify_economic_row(row)
         if rule is None:
             continue
+        if not is_high_impact_rule(rule):
+            continue
         event_date, event_time = parse_economic_datetime(row, timezone)
         if event_date is None:
             continue
@@ -724,6 +726,10 @@ def rule_by_category(category: str) -> dict[str, Any] | None:
         if rule["category"] == category:
             return rule
     return None
+
+
+def is_high_impact_rule(rule: dict[str, Any]) -> bool:
+    return str(rule.get("importance")) in {"高", "极高"}
 
 
 def event_name(row: dict[str, Any]) -> str:

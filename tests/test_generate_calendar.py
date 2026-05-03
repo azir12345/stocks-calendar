@@ -101,7 +101,7 @@ class GenerateCalendarTests(unittest.TestCase):
         rows = json.loads((ROOT / "tests/fixtures/fmp_economic.json").read_text(encoding="utf-8"))
         events = build_economic_events(rows, timezone="America/New_York", reminder_days=1)
 
-        self.assertEqual(2, len(events))
+        self.assertEqual(1, len(events))
         self.assertEqual("美国 CPI - 高影响", events[0].title)
         self.assertEqual(dt.time(8, 30), events[0].start.time())
         self.assertEqual("https://www.bls.gov/cpi/", events[0].url)
@@ -109,11 +109,6 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertIn("预计方向: 预计降低", events[0].description)
         self.assertIn("如果高于预期:", events[0].description)
         self.assertIn("重点影响股票:", events[0].description)
-        self.assertIn("美国服务业 PMI - 中到高影响", events[1].title)
-        self.assertIn("合并分项数量: 2", events[1].description)
-        self.assertIn("ISM Services PMI", events[1].description)
-        self.assertIn("ISM Services Prices", events[1].description)
-        self.assertIn("分项方向分化", events[1].description)
 
     def test_revenue_estimates_use_readable_units(self):
         self.assertEqual("$78.42 B", format_revenue_estimate(78423370000))
