@@ -49,8 +49,8 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertTrue(events[0].all_day)
         self.assertEqual("Apple (AAPL) 财报 - 盘后", events[0].title)
         self.assertTrue(events[0].description.startswith("Apple Stocks: stocks://?symbol=AAPL"))
-        self.assertEqual("https://www.tradingview.com/symbols/NASDAQ-AAPL/", events[0].url)
-        self.assertIn("TradingView: https://www.tradingview.com/symbols/NASDAQ-AAPL/", events[0].description)
+        self.assertEqual("https://www.tradingview.com/chart/?symbol=NASDAQ%3AAAPL", events[0].url)
+        self.assertIn("TradingView: https://www.tradingview.com/chart/?symbol=NASDAQ%3AAAPL", events[0].description)
         self.assertIn("Apple Stocks: stocks://?symbol=AAPL", events[0].description)
         self.assertIn("营收预期: $94.5 B", events[0].description)
 

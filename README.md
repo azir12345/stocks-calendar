@@ -57,8 +57,10 @@ symbols:
 `tradingview` is used to build links like:
 
 ```text
-https://www.tradingview.com/symbols/NASDAQ-AAPL/
+https://www.tradingview.com/chart/?symbol=NASDAQ%3AAAPL
 ```
+
+This is an HTTPS TradingView chart link, so iOS can handle it as a universal link when the TradingView app is installed.
 
 The generated description also includes a best-effort Apple Stocks URL scheme:
 

@@ -569,9 +569,9 @@ def format_decimal(value: float) -> str:
 
 
 def tradingview_link(watch_item: WatchSymbol, symbol: str) -> str:
-    tv_symbol = watch_item.tradingview or symbol
-    tv_symbol = tv_symbol.replace(":", "-").upper()
-    return f"https://www.tradingview.com/symbols/{urllib.parse.quote(tv_symbol)}/"
+    tv_symbol = (watch_item.tradingview or symbol).upper()
+    encoded_symbol = urllib.parse.quote(tv_symbol, safe="")
+    return f"https://www.tradingview.com/chart/?symbol={encoded_symbol}"
 
 
 def load_auto_financial_events(
