@@ -7,6 +7,7 @@ from scripts.generate_calendar import (
     WatchSymbol,
     build_earnings_events,
     build_economic_events,
+    format_revenue_estimate,
     load_earnings_rows,
     render_ics,
 )
@@ -33,6 +34,7 @@ class GenerateCalendarTests(unittest.TestCase):
                 "symbol": "AAPL",
                 "date": "2026-05-08",
                 "time": "amc",
+                "revenueEstimated": 94500000000,
             }
         ]
         events = build_earnings_events(
@@ -50,6 +52,7 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertEqual("https://www.tradingview.com/symbols/NASDAQ-AAPL/", events[0].url)
         self.assertIn("TradingView: https://www.tradingview.com/symbols/NASDAQ-AAPL/", events[0].description)
         self.assertIn("Apple Stocks: stocks://?symbol=AAPL", events[0].description)
+        self.assertIn("营收预期: $94.5 B", events[0].description)
 
     def test_precise_datetime_becomes_timed_event(self):
         rows = [
@@ -111,6 +114,11 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertIn("ISM Services PMI", events[1].description)
         self.assertIn("ISM Services Prices", events[1].description)
         self.assertIn("分项方向分化", events[1].description)
+
+    def test_revenue_estimates_use_readable_units(self):
+        self.assertEqual("$78.42 B", format_revenue_estimate(78423370000))
+        self.assertEqual("$950 M", format_revenue_estimate(950000000))
+        self.assertEqual("$0.42 M", format_revenue_estimate(420000))
 
 
 if __name__ == "__main__":

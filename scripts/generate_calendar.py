@@ -532,7 +532,7 @@ def build_earnings_description(
     if eps is not None:
         lines.append(f"EPS 预期: {eps}")
     if revenue is not None:
-        lines.append(f"营收预期: {revenue}")
+        lines.append(f"营收预期: {format_revenue_estimate(revenue)}")
 
     primary_url: str | None = None
 
@@ -552,6 +552,20 @@ def first_existing(row: dict[str, Any], keys: tuple[str, ...]) -> Any:
         if value not in (None, ""):
             return value
     return None
+
+
+def format_revenue_estimate(value: Any) -> str:
+    number = parse_number(value)
+    if number is None:
+        return str(value)
+    absolute = abs(number)
+    if absolute >= 1_000_000_000:
+        return f"${format_decimal(number / 1_000_000_000)} B"
+    return f"${format_decimal(number / 1_000_000)} M"
+
+
+def format_decimal(value: float) -> str:
+    return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
 def tradingview_link(watch_item: WatchSymbol, symbol: str) -> str:
