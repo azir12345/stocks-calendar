@@ -21,6 +21,7 @@ import yaml
 
 
 FMP_EARNINGS_URL = "https://financialmodelingprep.com/stable/earnings-calendar"
+NASDAQ_EARNINGS_URL = "https://api.nasdaq.com/api/calendar/earnings"
 FMP_ECONOMIC_CALENDAR_URL = "https://financialmodelingprep.com/stable/economic-calendar"
 FMP_MARKET_HOLIDAYS_URL = "https://financialmodelingprep.com/stable/holidays-by-exchange"
 DEFAULT_TIMEZONE = "America/New_York"
@@ -260,6 +261,8 @@ def main() -> int:
         end_date=end_date,
         fixture=args.fixture,
     )
+    if config.get("earnings", {}).get("enrichment", {}).get("nasdaq", {}).get("enabled", False):
+        earnings_rows = enrich_earnings_rows_with_nasdaq(earnings_rows, timezone)
     events = build_earnings_events(
         rows=earnings_rows,
         watch_symbols=watch_symbols,
@@ -380,6 +383,72 @@ def load_earnings_rows(
     return [row for row in data if str(row.get("symbol", "")).upper() in wanted]
 
 
+def enrich_earnings_rows_with_nasdaq(rows: list[dict[str, Any]], timezone: str) -> list[dict[str, Any]]:
+    dates: set[dt.date] = set()
+    for row in rows:
+        event_date, _ = parse_earnings_datetime(row, timezone)
+        if event_date is not None:
+            dates.add(event_date)
+
+    nasdaq_rows_by_date: dict[dt.date, list[dict[str, Any]]] = {}
+    for event_date in sorted(dates):
+        try:
+            nasdaq_rows_by_date[event_date] = load_nasdaq_earnings_rows(event_date)
+        except Exception as exc:
+            print(f"WARNING: Nasdaq earnings enrichment failed for {event_date}: {exc}", file=sys.stderr)
+
+    return apply_nasdaq_enrichment(rows, nasdaq_rows_by_date, timezone)
+
+
+def load_nasdaq_earnings_rows(event_date: dt.date) -> list[dict[str, Any]]:
+    query = urllib.parse.urlencode({"date": event_date.isoformat()})
+    request = urllib.request.Request(
+        f"{NASDAQ_EARNINGS_URL}?{query}",
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; stocks-calendar/1.0)",
+            "Accept": "application/json",
+            "Origin": "https://www.nasdaq.com",
+            "Referer": "https://www.nasdaq.com/",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        payload = response.read().decode("utf-8")
+    data = json.loads(payload)
+    rows = data.get("data", {}).get("rows", [])
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def apply_nasdaq_enrichment(
+    rows: list[dict[str, Any]],
+    nasdaq_rows_by_date: dict[dt.date, list[dict[str, Any]]],
+    timezone: str,
+) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for row in rows:
+        updated = dict(row)
+        event_date, _ = parse_earnings_datetime(updated, timezone)
+        symbol = str(updated.get("symbol", "")).upper()
+        nasdaq_row = find_nasdaq_row(nasdaq_rows_by_date.get(event_date, []), symbol)
+        if nasdaq_row and detect_session(updated) == "unknown":
+            nasdaq_time = as_optional_str(nasdaq_row.get("time"))
+            if nasdaq_time and nasdaq_time != "time-not-supplied":
+                updated["time"] = nasdaq_time
+                updated["sessionSource"] = "Nasdaq Earnings Calendar"
+        if nasdaq_row and not get_raw_company_name(updated):
+            updated["companyName"] = as_optional_str(nasdaq_row.get("name"))
+        enriched.append(updated)
+    return enriched
+
+
+def find_nasdaq_row(rows: list[dict[str, Any]], symbol: str) -> dict[str, Any] | None:
+    for row in rows:
+        if str(row.get("symbol", "")).upper() == symbol:
+            return row
+    return None
+
+
 def build_earnings_events(
     *,
     rows: list[dict[str, Any]],
@@ -482,9 +551,9 @@ def parse_explicit_time(row: dict[str, Any]) -> dt.time | None:
 
 def detect_session(row: dict[str, Any]) -> str:
     raw_values = " ".join(str(row.get(key, "")) for key in ("time", "when", "session", "publicationTime")).lower()
-    if any(token in raw_values for token in ("bmo", "before", "pre-market", "pre market", "盘前")):
+    if any(token in raw_values for token in ("bmo", "before", "pre-market", "pre market", "time-pre-market", "盘前")):
         return "before"
-    if any(token in raw_values for token in ("amc", "after", "post-market", "post market", "盘后")):
+    if any(token in raw_values for token in ("amc", "after", "post-market", "post market", "time-after-hours", "盘后")):
         return "after"
     if any(token in raw_values for token in ("during", "market hours", "dmh", "盘中")):
         return "during"
@@ -509,11 +578,18 @@ def infer_session_from_time(value: dt.time) -> str:
 
 
 def get_company_name(row: dict[str, Any], watch_item: WatchSymbol) -> str | None:
+    value = get_raw_company_name(row)
+    if value:
+        return value
+    return watch_item.name
+
+
+def get_raw_company_name(row: dict[str, Any]) -> str | None:
     for key in ("companyName", "name", "company"):
         value = as_optional_str(row.get(key))
         if value:
             return value
-    return watch_item.name
+    return None
 
 
 def build_earnings_description(
@@ -533,6 +609,9 @@ def build_earnings_description(
         lines.append(f"EPS 预期: {eps}")
     if revenue is not None:
         lines.append(f"营收预期: {format_revenue_estimate(revenue)}")
+    session_source = as_optional_str(row.get("sessionSource"))
+    if session_source:
+        lines.append(f"财报时间来源: {session_source}")
 
     primary_url: str | None = None
 

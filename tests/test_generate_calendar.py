@@ -5,6 +5,7 @@ from pathlib import Path
 
 from scripts.generate_calendar import (
     WatchSymbol,
+    apply_nasdaq_enrichment,
     build_earnings_events,
     build_economic_events,
     format_revenue_estimate,
@@ -114,6 +115,33 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertEqual("$78.42 B", format_revenue_estimate(78423370000))
         self.assertEqual("$950 M", format_revenue_estimate(950000000))
         self.assertEqual("$0.42 M", format_revenue_estimate(420000))
+
+    def test_nasdaq_enrichment_fills_missing_earnings_session(self):
+        rows = [{"symbol": "AMD", "date": "2026-05-05", "revenueEstimated": 9883001000}]
+        enriched = apply_nasdaq_enrichment(
+            rows,
+            {
+                dt.date(2026, 5, 5): [
+                    {
+                        "symbol": "AMD",
+                        "name": "Advanced Micro Devices, Inc.",
+                        "time": "time-after-hours",
+                    }
+                ]
+            },
+            timezone="America/New_York",
+        )
+        events = build_earnings_events(
+            rows=enriched,
+            watch_symbols=[WatchSymbol(symbol="AMD", name="Advanced Micro Devices", tradingview="NASDAQ:AMD")],
+            timezone="America/New_York",
+            reminder_days=1,
+            timed_event_minutes=30,
+            links_config={},
+        )
+
+        self.assertEqual("Advanced Micro Devices, Inc. (AMD) 财报 - 盘后", events[0].title)
+        self.assertIn("财报时间来源: Nasdaq Earnings Calendar", events[0].description)
 
 
 if __name__ == "__main__":

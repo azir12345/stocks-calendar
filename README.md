@@ -24,11 +24,12 @@ On iPhone:
 
 ## Data Source
 
-This project uses Financial Modeling Prep's earnings and economic calendar endpoints:
+This project uses Financial Modeling Prep's earnings and economic calendar endpoints, with Nasdaq earnings calendar enrichment for before-market and after-hours timing:
 
 ```text
 https://financialmodelingprep.com/stable/earnings-calendar
 https://financialmodelingprep.com/stable/economic-calendar
+https://api.nasdaq.com/api/calendar/earnings
 ```
 
 Create an API key at Financial Modeling Prep, then add it to the GitHub repository:
@@ -74,6 +75,7 @@ Apple does not document this as a stable public integration, so TradingView HTTP
 
 - The calendar window is today through the next 30 days.
 - If the data source provides a precise time, the event is timed in `America/New_York`.
+- If FMP does not provide before/after timing, Nasdaq earnings calendar is used automatically to enrich `盘前` / `盘后`.
 - If the data source only provides before-market or after-market status, the event is all-day and the title says `盘前` or `盘后`.
 - If timing is unknown, the title says `时间待定`.
 - Each event includes a one-day-before `VALARM`.

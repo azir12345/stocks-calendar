@@ -10,6 +10,9 @@ calendar:
 earnings:
   provider: fmp
   require_confirmed_only: false
+  enrichment:
+    nasdaq:
+      enabled: true
 
 links:
   include_tradingview: true
