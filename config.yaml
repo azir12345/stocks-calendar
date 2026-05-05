@@ -6,6 +6,7 @@ calendar:
   timed_event_minutes: 30
   reminder_days_before: 1
   output_path: public/earnings.ics
+  status_path: public/status.json
 
 earnings:
   provider: fmp

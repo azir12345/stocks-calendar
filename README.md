@@ -12,6 +12,12 @@ After GitHub Pages is enabled and the workflow succeeds, subscribe to:
 https://<github-user>.github.io/stocks-calendar/earnings.ics
 ```
 
+Generation status is published at:
+
+```text
+https://<github-user>.github.io/stocks-calendar/status.json
+```
+
 On iPhone:
 
 1. Open Settings.
@@ -78,6 +84,7 @@ Apple does not document this as a stable public integration, so TradingView HTTP
 - If FMP does not provide before/after timing, Nasdaq earnings calendar is used automatically to enrich `盘前` / `盘后`.
 - If the data source only provides before-market or after-market status, the event is timed with a default New York time so iOS converts it correctly for local time zones: `盘前` -> `08:00`, `盘后` -> `16:05`, `盘中` -> `12:00`.
 - If timing is unknown, the title says `时间待定`.
+- Earnings descriptions include `时间精度` so inferred session times are not confused with official minute-level release times.
 - Each event includes a one-day-before `VALARM`.
 
 Example title:

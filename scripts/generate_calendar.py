@@ -250,6 +250,7 @@ def main() -> int:
     reminder_days = int(calendar_config.get("reminder_days_before", 1))
     timed_event_minutes = int(calendar_config.get("timed_event_minutes", 30))
     output_path = root / (args.output or calendar_config.get("output_path", "public/earnings.ics"))
+    status_path = root / str(calendar_config.get("status_path", "public/status.json"))
 
     today = dt.datetime.now(ZoneInfo(timezone)).date()
     end_date = today + dt.timedelta(days=window_days)
@@ -261,7 +262,8 @@ def main() -> int:
         end_date=end_date,
         fixture=args.fixture,
     )
-    if config.get("earnings", {}).get("enrichment", {}).get("nasdaq", {}).get("enabled", False):
+    nasdaq_enrichment_enabled = config.get("earnings", {}).get("enrichment", {}).get("nasdaq", {}).get("enabled", False)
+    if nasdaq_enrichment_enabled:
         earnings_rows = enrich_earnings_rows_with_nasdaq(earnings_rows, timezone)
     events = build_earnings_events(
         rows=earnings_rows,
@@ -288,8 +290,28 @@ def main() -> int:
     calendar_description = str(calendar_config.get("description", calendar_name))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(render_ics(calendar_name, calendar_description, events), encoding="utf-8")
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(
+        json.dumps(
+            build_status(
+                events=events,
+                watch_symbols=watch_symbols,
+                start_date=today,
+                end_date=end_date,
+                timezone=timezone,
+                output_path=output_path,
+                nasdaq_enrichment_enabled=nasdaq_enrichment_enabled,
+            ),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     print(f"Wrote {len(events)} events to {output_path}")
+    print(f"Wrote status to {status_path}")
     return 0
 
 
@@ -301,6 +323,56 @@ def load_yaml(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"Expected YAML object in {path}")
     return data
+
+
+def build_status(
+    *,
+    events: list[CalendarEvent],
+    watch_symbols: list[WatchSymbol],
+    start_date: dt.date,
+    end_date: dt.date,
+    timezone: str,
+    output_path: Path,
+    nasdaq_enrichment_enabled: bool,
+) -> dict[str, Any]:
+    counts = {
+        "total": len(events),
+        "earnings": 0,
+        "macro": 0,
+        "holiday": 0,
+        "manual": 0,
+        "other": 0,
+    }
+    for event in events:
+        if event.uid.startswith("earnings-"):
+            counts["earnings"] += 1
+        elif event.uid.startswith("economic-"):
+            counts["macro"] += 1
+        elif event.uid.startswith("holiday-"):
+            counts["holiday"] += 1
+        elif event.uid.startswith("manual-"):
+            counts["manual"] += 1
+        else:
+            counts["other"] += 1
+
+    return {
+        "generated_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "window": {
+            "start": start_date.isoformat(),
+            "end": end_date.isoformat(),
+            "timezone": timezone,
+        },
+        "watchlist_count": len(watch_symbols),
+        "watchlist_symbols": [item.symbol for item in watch_symbols],
+        "event_counts": counts,
+        "output_file": str(output_path),
+        "data_sources": {
+            "earnings": "Financial Modeling Prep earnings-calendar",
+            "earnings_session_enrichment": "Nasdaq earnings calendar" if nasdaq_enrichment_enabled else None,
+            "macro": "Financial Modeling Prep economic-calendar",
+            "holidays": "Financial Modeling Prep holidays-by-exchange",
+        },
+    }
 
 
 def load_watchlist(path: Path) -> list[WatchSymbol]:
@@ -489,7 +561,15 @@ def build_earnings_events(
             end = start + dt.timedelta(minutes=timed_event_minutes)
             all_day = False
 
-        description, primary_url = build_earnings_description(row, watch_item, symbol, session_label, links_config)
+        description, primary_url = build_earnings_description(
+            row=row,
+            watch_item=watch_item,
+            symbol=symbol,
+            session_label=session_label,
+            links_config=links_config,
+            used_default_session_time=precise_time is None and effective_time is not None,
+            used_precise_time=precise_time is not None,
+        )
         events.append(
             CalendarEvent(
                 uid=make_uid("earnings", symbol, event_date.isoformat(), session_label),
@@ -617,6 +697,8 @@ def build_earnings_description(
     symbol: str,
     session_label: str,
     links_config: dict[str, Any],
+    used_default_session_time: bool = False,
+    used_precise_time: bool = False,
 ) -> tuple[str, str | None]:
     tradingview_url = tradingview_link(watch_item, symbol)
     apple_stocks_url = f"stocks://?symbol={urllib.parse.quote(symbol)}"
@@ -632,8 +714,12 @@ def build_earnings_description(
     if session_source:
         lines.append(f"财报时间来源: {session_source}")
     default_time = default_time_for_session(session_from_label(session_label))
-    if default_time is not None:
-        lines.append(f"时间规则: {session_label}默认 {default_time.strftime('%H:%M')} America/New_York，用于本地时区换算")
+    if used_default_session_time and default_time is not None:
+        lines.append(f"时间精度: {session_label}标记，默认映射 {default_time.strftime('%H:%M')} America/New_York，非官方分钟级发布时间")
+    elif used_precise_time:
+        lines.append("时间精度: 数据源提供具体时间")
+    else:
+        lines.append("时间精度: 未知，全天事件")
 
     primary_url: str | None = None
 
