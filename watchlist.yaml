@@ -30,6 +30,11 @@ symbols:
   - symbol: HSBC
     name: HSBC
     tradingview: NYSE:HSBC
+    earnings_symbols:
+      - HSBC
+      - HSBA
+    earnings_timezone: Europe/London
+    ir_url: https://www.hsbc.com/investors/results-and-announcements
   - symbol: NOK
     name: Nokia
     tradingview: NYSE:NOK

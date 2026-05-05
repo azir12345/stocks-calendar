@@ -135,6 +135,40 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertIn("交易所时区: Asia/Seoul", events[0].description)
         self.assertIn("DTSTART;TZID=Asia/Seoul:20260512T080000", ics)
 
+    def test_adr_can_map_to_underlying_earnings_symbol(self):
+        rows = [
+            {
+                "symbol": "HSBA",
+                "date": "2026-05-12",
+                "time": "bmo",
+            }
+        ]
+        events = build_earnings_events(
+            rows=rows,
+            watch_symbols=[
+                WatchSymbol(
+                    symbol="HSBC",
+                    name="HSBC",
+                    tradingview="NYSE:HSBC",
+                    earnings_symbols=("HSBC", "HSBA"),
+                    earnings_timezone="Europe/London",
+                )
+            ],
+            timezone="America/New_York",
+            reminder_days=1,
+            timed_event_minutes=30,
+            links_config={},
+        )
+        ics = render_ics("Test", "Test calendar", events)
+
+        self.assertEqual("HSBC (HSBC) 财报 - 盘前", events[0].title)
+        self.assertEqual("Europe/London", events[0].timezone)
+        self.assertEqual("https://www.tradingview.com/chart/?symbol=NYSE%3AHSBC", events[0].url)
+        self.assertIn("Apple Stocks: stocks://?symbol=HSBC", events[0].description)
+        self.assertIn("财报查询代码: HSBA", events[0].description)
+        self.assertIn("交易所时区: Europe/London", events[0].description)
+        self.assertIn("DTSTART;TZID=Europe/London:20260512T080000", ics)
+
     def test_economic_events_include_impact_logic_and_expected_direction(self):
         rows = json.loads((ROOT / "tests/fixtures/fmp_economic.json").read_text(encoding="utf-8"))
         events = build_economic_events(rows, timezone="America/New_York", reminder_days=1)
@@ -217,6 +251,16 @@ class GenerateCalendarTests(unittest.TestCase):
 
         self.assertEqual("17:30", parsed["time"])
         self.assertEqual("after", parsed["session"])
+
+    def test_official_ir_text_accepts_uk_date_and_bst_time(self):
+        text = (
+            "HSBC Holdings plc 1Q 2026 Earnings Release 05 May 2026. "
+            "HSBC will announce its financial results on Tuesday, 5 May at 5 am BST."
+        )
+        parsed = parse_official_earnings_text(text, dt.date(2026, 5, 5))
+
+        self.assertEqual("05:00", parsed["time"])
+        self.assertEqual("before", parsed["session"])
 
     def test_official_ir_overrides_event_url_and_time(self):
         rows = [

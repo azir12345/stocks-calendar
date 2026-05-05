@@ -90,6 +90,22 @@ symbols:
 
 When `timezone` is present, earnings events for that symbol are written with that local exchange timezone, for example `DTSTART;TZID=Asia/Seoul`. US macro events remain controlled by `config.yaml` and are still limited to the configured US economic calendar countries.
 
+ADR entries can keep the ADR as the displayed ticker while querying the original listing for earnings:
+
+```yaml
+symbols:
+  - symbol: HSBC
+    name: HSBC
+    tradingview: NYSE:HSBC
+    earnings_symbols:
+      - HSBC
+      - HSBA
+    earnings_timezone: Europe/London
+    ir_url: https://www.hsbc.com/investors/results-and-announcements
+```
+
+`symbol` and `tradingview` stay tied to the subscribed ticker you care about. `earnings_symbols` are the data-source symbols accepted for the company's earnings record. `earnings_timezone` is used for the generated event time when the earnings row comes from the underlying listing.
+
 ## Timing Rules
 
 - The calendar window is today through the next 30 days.

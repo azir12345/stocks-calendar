@@ -215,6 +215,8 @@ class WatchSymbol:
     symbol: str
     name: str | None = None
     tradingview: str | None = None
+    earnings_symbols: tuple[str, ...] = ()
+    earnings_timezone: str | None = None
     timezone: str | None = None
     ir_url: str | None = None
     ir_press_releases_rss: str | None = None
@@ -263,7 +265,7 @@ def main() -> int:
 
     earnings_rows = load_earnings_rows(
         config=config,
-        symbols=[item.symbol for item in watch_symbols],
+        symbols=collect_earnings_symbols(watch_symbols),
         start_date=today,
         end_date=end_date,
         fixture=args.fixture,
@@ -371,7 +373,11 @@ def build_status(
         },
         "watchlist_count": len(watch_symbols),
         "watchlist_symbols": [item.symbol for item in watch_symbols],
-        "symbol_timezones": {item.symbol: item.timezone for item in watch_symbols if item.timezone},
+        "symbol_timezones": {
+            item.symbol: earnings_timezone(item, timezone)
+            for item in watch_symbols
+            if earnings_timezone(item, timezone) != timezone
+        },
         "event_counts": counts,
         "output_file": str(output_path),
         "data_sources": {
@@ -405,6 +411,8 @@ def load_watchlist(path: Path) -> list[WatchSymbol]:
                 symbol=symbol,
                 name=as_optional_str(item.get("name")),
                 tradingview=as_optional_str(item.get("tradingview")),
+                earnings_symbols=parse_earnings_symbols(item, symbol),
+                earnings_timezone=as_optional_str(item.get("earnings_timezone")),
                 timezone=as_optional_str(item.get("timezone")),
                 ir_url=as_optional_str(item.get("ir_url")),
                 ir_press_releases_rss=as_optional_str(item.get("ir_press_releases_rss")),
@@ -415,6 +423,40 @@ def load_watchlist(path: Path) -> list[WatchSymbol]:
     for item in symbols:
         deduped[item.symbol] = item
     return list(deduped.values())
+
+
+def parse_earnings_symbols(item: dict[str, Any], symbol: str) -> tuple[str, ...]:
+    raw_values: list[str] = []
+    for key in ("earnings_symbol", "earnings_symbols"):
+        value = item.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            raw_values.append(value)
+        elif isinstance(value, list):
+            raw_values.extend(str(entry) for entry in value)
+        else:
+            raw_values.append(str(value))
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in [symbol, *raw_values]:
+        cleaned = str(value).strip().upper()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            normalized.append(cleaned)
+    return tuple(normalized)
+
+
+def collect_earnings_symbols(watch_symbols: list[WatchSymbol]) -> list[str]:
+    symbols: list[str] = []
+    seen: set[str] = set()
+    for item in watch_symbols:
+        for value in item.earnings_symbols or (item.symbol,):
+            normalized = str(value).strip().upper()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                symbols.append(normalized)
+    return symbols
 
 
 def as_optional_str(value: Any) -> str | None:
@@ -537,12 +579,12 @@ def enrich_earnings_rows_with_official_ir(
     watch_symbols: list[WatchSymbol],
     timezone: str,
 ) -> list[dict[str, Any]]:
-    watch_by_symbol = {item.symbol: item for item in watch_symbols}
+    watch_by_symbol = build_watch_symbol_lookup(watch_symbols)
     enriched: list[dict[str, Any]] = []
     for row in rows:
         updated = dict(row)
-        symbol = str(updated.get("symbol", "")).upper()
-        watch_item = watch_by_symbol.get(symbol)
+        source_symbol = str(updated.get("symbol", "")).upper()
+        watch_item = watch_by_symbol.get(source_symbol)
         if watch_item is None:
             enriched.append(updated)
             continue
@@ -772,6 +814,9 @@ def event_date_patterns(text: str, event_date: dt.date) -> tuple[str, ...]:
     exact_year_patterns = (
         rf"\b{month_name}\s+0?{day},\s+{year}\b",
         rf"\b{month_abbr}\.?\s+0?{day},\s+{year}\b",
+        rf"\b0?{day}\s+{month_name},?\s+{year}\b",
+        rf"\b0?{day}\s+{month_abbr}\.?,?\s+{year}\b",
+        rf"\b{year}-0?{event_date.month}-0?{day}\b",
         rf"\b{event_date.month}/0?{day}/{year}\b",
         rf"\b{event_date.month}/0?{day}/{str(year)[-2:]}\b",
     )
@@ -785,39 +830,48 @@ def event_date_patterns(text: str, event_date: dt.date) -> tuple[str, ...]:
     return (
         rf"\b{weekday},\s+{month_name}\s+0?{day}\b",
         rf"\b{weekday},\s+{month_abbr}\.?\s+0?{day}\b",
+        rf"\b{weekday},\s+0?{day}\s+{month_name}\b",
+        rf"\b{weekday},\s+0?{day}\s+{month_abbr}\.?\b",
         rf"\b{month_name}\s+0?{day}\b",
         rf"\b{month_abbr}\.?\s+0?{day}\b",
+        rf"\b0?{day}\s+{month_name}\b",
+        rf"\b0?{day}\s+{month_abbr}\.?\b",
     )
 
 
 def extract_official_earnings_time(text: str) -> dt.time | None:
-    priority_windows = []
+    priority_windows: list[tuple[str, bool]] = []
     lowered = text.lower()
     for keyword in ("conference call", "webcast", "management will conduct", "discuss these results"):
         index = lowered.find(keyword)
         if index >= 0:
-            priority_windows.append(text[index : index + 300])
-    priority_windows.append(text)
-    for window in priority_windows:
-        parsed = find_time_with_timezone(window, preferred_zones=("et", "edt", "est"))
+            priority_windows.append((text[max(0, index - 120) : index + 420], True))
+    for keyword in ("earnings release", "financial results", "will announce", "announced", "reported results"):
+        index = lowered.find(keyword)
+        if index >= 0:
+            priority_windows.append((text[max(0, index - 120) : index + 420], False))
+    priority_windows.append((text, False))
+    for window, prefer_last in priority_windows:
+        parsed = find_time_with_timezone(window, preferred_zones=("et", "edt", "est"), prefer_last=prefer_last)
         if parsed:
             return parsed
     return None
 
 
-def find_time_with_timezone(text: str, preferred_zones: tuple[str, ...]) -> dt.time | None:
+def find_time_with_timezone(text: str, preferred_zones: tuple[str, ...], prefer_last: bool = False) -> dt.time | None:
     pattern = re.compile(
-        r"\b(\d{1,2})(?::([0-5]\d))?\s*(a\.m\.|p\.m\.|am|pm)\s*"
-        r"\(?\s*(ET|EDT|EST|Eastern\s+Time|PT|PDT|PST|Pacific\s+Time|CT|CDT|CST|Central\s+Time|MT|MDT|MST|Mountain\s+Time)\b\s*\)?",
+        r"\b(\d{1,2})(?:(?::|\.)([0-5]\d))?\s*(a\.m\.|p\.m\.|am|pm)\s*"
+        r"\(?\s*(ET|EDT|EST|Eastern\s+Time|PT|PDT|PST|Pacific\s+Time|CT|CDT|CST|Central\s+Time|MT|MDT|MST|Mountain\s+Time|BST|GMT|UTC|London\s+Time)\b\s*\)?",
         flags=re.IGNORECASE,
     )
     matches = list(pattern.finditer(text))
-    for match in matches:
+    iterable = reversed(matches) if prefer_last else matches
+    for match in iterable:
         zone = normalize_us_timezone(match.group(4))
         if zone in preferred_zones:
             return convert_time_match_to_new_york(match)
     if matches:
-        return convert_time_match_to_new_york(matches[0])
+        return convert_time_match_to_new_york(matches[-1] if prefer_last else matches[0])
     return None
 
 
@@ -847,6 +901,7 @@ def normalize_us_timezone(value: str) -> str:
         "pacific time": "pt",
         "central time": "ct",
         "mountain time": "mt",
+        "london time": "bst",
     }.get(normalized, normalized)
 
 
@@ -859,15 +914,16 @@ def build_earnings_events(
     timed_event_minutes: int,
     links_config: dict[str, Any],
 ) -> list[CalendarEvent]:
-    watch_by_symbol = {item.symbol: item for item in watch_symbols}
+    watch_by_symbol = build_watch_symbol_lookup(watch_symbols)
     events: list[CalendarEvent] = []
 
     for row in rows:
-        symbol = str(row.get("symbol", "")).upper()
-        if symbol not in watch_by_symbol:
+        source_symbol = str(row.get("symbol", "")).upper()
+        watch_item = watch_by_symbol.get(source_symbol)
+        if watch_item is None:
             continue
 
-        watch_item = watch_by_symbol[symbol]
+        display_symbol = watch_item.symbol
         event_timezone = earnings_timezone(watch_item, timezone)
         event_date, precise_time = parse_earnings_datetime(row, event_timezone)
         if event_date is None:
@@ -878,7 +934,7 @@ def build_earnings_events(
             session = infer_session_from_time(precise_time)
         session_label = session_label_cn(session)
         company_name = get_company_name(row, watch_item)
-        title_name = f"{company_name} ({symbol})" if company_name else symbol
+        title_name = f"{company_name} ({display_symbol})" if company_name else display_symbol
         title = f"{title_name} 财报 - {session_label}"
 
         effective_time = precise_time or default_time_for_session(session)
@@ -894,7 +950,8 @@ def build_earnings_events(
         description, primary_url = build_earnings_description(
             row=row,
             watch_item=watch_item,
-            symbol=symbol,
+            display_symbol=display_symbol,
+            source_symbol=source_symbol,
             session_label=session_label,
             event_timezone=event_timezone,
             links_config=links_config,
@@ -903,7 +960,7 @@ def build_earnings_events(
         )
         events.append(
             CalendarEvent(
-                uid=make_uid("earnings", symbol, event_date.isoformat(), session_label),
+                uid=make_uid("earnings", display_symbol, event_date.isoformat(), session_label),
                 title=title,
                 start=start,
                 end=end,
@@ -919,7 +976,15 @@ def build_earnings_events(
 
 
 def earnings_timezone(watch_item: WatchSymbol, default_timezone: str) -> str:
-    return watch_item.timezone or default_timezone
+    return watch_item.earnings_timezone or watch_item.timezone or default_timezone
+
+
+def build_watch_symbol_lookup(watch_symbols: list[WatchSymbol]) -> dict[str, WatchSymbol]:
+    lookup: dict[str, WatchSymbol] = {}
+    for item in watch_symbols:
+        for symbol in item.earnings_symbols or (item.symbol,):
+            lookup[str(symbol).strip().upper()] = item
+    return lookup
 
 
 def parse_earnings_datetime(row: dict[str, Any], timezone: str) -> tuple[dt.date | None, dt.time | None]:
@@ -1031,16 +1096,20 @@ def get_raw_company_name(row: dict[str, Any]) -> str | None:
 def build_earnings_description(
     row: dict[str, Any],
     watch_item: WatchSymbol,
-    symbol: str,
+    display_symbol: str,
+    source_symbol: str,
     session_label: str,
     event_timezone: str,
     links_config: dict[str, Any],
     used_default_session_time: bool = False,
     used_precise_time: bool = False,
 ) -> tuple[str, str | None]:
-    tradingview_url = tradingview_link(watch_item, symbol)
-    apple_stocks_url = f"stocks://?symbol={urllib.parse.quote(symbol)}"
-    lines = [f"Apple Stocks: {apple_stocks_url}", f"Ticker: {symbol}", f"交易所时区: {event_timezone}", f"财报时间: {session_label}"]
+    tradingview_url = tradingview_link(watch_item, display_symbol)
+    apple_stocks_url = f"stocks://?symbol={urllib.parse.quote(display_symbol)}"
+    lines = [f"Apple Stocks: {apple_stocks_url}", f"Ticker: {display_symbol}"]
+    if source_symbol != display_symbol:
+        lines.append(f"财报查询代码: {source_symbol}")
+    lines.extend([f"交易所时区: {event_timezone}", f"财报时间: {session_label}"])
 
     eps = first_existing(row, ("epsEstimated", "epsEstimate", "epsConsensus"))
     revenue = first_existing(row, ("revenueEstimated", "revenueEstimate", "revenueConsensus"))
