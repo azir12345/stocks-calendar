@@ -208,8 +208,10 @@ class GenerateCalendarTests(unittest.TestCase):
         )
 
         self.assertEqual(dt.time(17, 0), events[0].start.time())
-        self.assertEqual("https://ir.amd.com/news-events/press-releases/detail/1282/amd-to-report-fiscal-first-quarter-2026-financial-results", events[0].url)
+        self.assertEqual("https://www.tradingview.com/chart/?symbol=NASDAQ%3AAMD", events[0].url)
         self.assertIn("官方财报页面:", events[0].description)
+        self.assertIn("TradingView: https://www.tradingview.com/chart/?symbol=NASDAQ%3AAMD", events[0].description)
+        self.assertNotIn("Source: https://ir.amd.com/news-events/press-releases/detail/1282/amd-to-report-fiscal-first-quarter-2026-financial-results", events[0].description)
 
 
 if __name__ == "__main__":

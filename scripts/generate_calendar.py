@@ -1056,16 +1056,12 @@ def build_earnings_description(
         lines.append("时间精度: 未知，全天事件")
 
     primary_url: str | None = None
-
-    if official_url:
-        primary_url = official_url
     if links_config.get("include_tradingview", True):
         lines.append(f"TradingView: {tradingview_url}")
-        if primary_url is None:
-            primary_url = tradingview_url
+        primary_url = tradingview_url
 
     source_url = first_existing(row, ("url", "sourceUrl"))
-    if source_url:
+    if source_url and source_url != official_url:
         lines.append(f"Source: {source_url}")
     return "\n".join(lines), primary_url
 
