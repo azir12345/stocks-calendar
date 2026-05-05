@@ -479,12 +479,13 @@ def build_earnings_events(
         title_name = f"{company_name} ({symbol})" if company_name else symbol
         title = f"{title_name} 财报 - {session_label}"
 
-        if precise_time is None:
+        effective_time = precise_time or default_time_for_session(session)
+        if effective_time is None:
             start: dt.date | dt.datetime = event_date
             end: dt.date | dt.datetime = event_date + dt.timedelta(days=1)
             all_day = True
         else:
-            start = dt.datetime.combine(event_date, precise_time, tzinfo=ZoneInfo(timezone))
+            start = dt.datetime.combine(event_date, effective_time, tzinfo=ZoneInfo(timezone))
             end = start + dt.timedelta(minutes=timed_event_minutes)
             all_day = False
 
@@ -569,12 +570,30 @@ def session_label_cn(session: str) -> str:
     }.get(session, "时间待定")
 
 
+def session_from_label(label: str) -> str:
+    return {
+        "盘前": "before",
+        "盘后": "after",
+        "盘中": "during",
+    }.get(label, "unknown")
+
+
 def infer_session_from_time(value: dt.time) -> str:
     if value < dt.time(9, 30):
         return "before"
     if value >= dt.time(16, 0):
         return "after"
     return "during"
+
+
+def default_time_for_session(session: str) -> dt.time | None:
+    if session == "before":
+        return dt.time(8, 0)
+    if session == "after":
+        return dt.time(16, 5)
+    if session == "during":
+        return dt.time(12, 0)
+    return None
 
 
 def get_company_name(row: dict[str, Any], watch_item: WatchSymbol) -> str | None:
@@ -612,6 +631,9 @@ def build_earnings_description(
     session_source = as_optional_str(row.get("sessionSource"))
     if session_source:
         lines.append(f"财报时间来源: {session_source}")
+    default_time = default_time_for_session(session_from_label(session_label))
+    if default_time is not None:
+        lines.append(f"时间规则: {session_label}默认 {default_time.strftime('%H:%M')} America/New_York，用于本地时区换算")
 
     primary_url: str | None = None
 

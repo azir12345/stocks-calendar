@@ -76,7 +76,7 @@ Apple does not document this as a stable public integration, so TradingView HTTP
 - The calendar window is today through the next 30 days.
 - If the data source provides a precise time, the event is timed in `America/New_York`.
 - If FMP does not provide before/after timing, Nasdaq earnings calendar is used automatically to enrich `盘前` / `盘后`.
-- If the data source only provides before-market or after-market status, the event is all-day and the title says `盘前` or `盘后`.
+- If the data source only provides before-market or after-market status, the event is timed with a default New York time so iOS converts it correctly for local time zones: `盘前` -> `08:00`, `盘后` -> `16:05`, `盘中` -> `12:00`.
 - If timing is unknown, the title says `时间待定`.
 - Each event includes a one-day-before `VALARM`.
 

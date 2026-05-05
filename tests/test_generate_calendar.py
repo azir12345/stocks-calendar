@@ -29,7 +29,7 @@ class GenerateCalendarTests(unittest.TestCase):
 
         self.assertEqual(["AAPL", "MSFT"], [row["symbol"] for row in rows])
 
-    def test_all_day_event_includes_market_session_in_title(self):
+    def test_market_session_event_uses_default_eastern_time(self):
         rows = [
             {
                 "symbol": "AAPL",
@@ -47,13 +47,16 @@ class GenerateCalendarTests(unittest.TestCase):
             links_config={"include_tradingview": True, "include_apple_stocks": True},
         )
 
-        self.assertTrue(events[0].all_day)
+        self.assertFalse(events[0].all_day)
         self.assertEqual("Apple (AAPL) 财报 - 盘后", events[0].title)
+        self.assertEqual(dt.time(16, 5), events[0].start.time())
+        self.assertEqual(dt.time(16, 35), events[0].end.time())
         self.assertTrue(events[0].description.startswith("Apple Stocks: stocks://?symbol=AAPL"))
         self.assertEqual("https://www.tradingview.com/chart/?symbol=NASDAQ%3AAAPL", events[0].url)
         self.assertIn("TradingView: https://www.tradingview.com/chart/?symbol=NASDAQ%3AAAPL", events[0].description)
         self.assertIn("Apple Stocks: stocks://?symbol=AAPL", events[0].description)
         self.assertIn("营收预期: $94.5 B", events[0].description)
+        self.assertIn("时间规则: 盘后默认 16:05 America/New_York", events[0].description)
 
     def test_precise_datetime_becomes_timed_event(self):
         rows = [
@@ -141,6 +144,8 @@ class GenerateCalendarTests(unittest.TestCase):
         )
 
         self.assertEqual("Advanced Micro Devices, Inc. (AMD) 财报 - 盘后", events[0].title)
+        self.assertFalse(events[0].all_day)
+        self.assertEqual(dt.time(16, 5), events[0].start.time())
         self.assertIn("财报时间来源: Nasdaq Earnings Calendar", events[0].description)
 
 
