@@ -30,12 +30,13 @@ On iPhone:
 
 ## Data Source
 
-This project uses Financial Modeling Prep's earnings and economic calendar endpoints, with Nasdaq earnings calendar enrichment for before-market and after-hours timing:
+This project uses Financial Modeling Prep's earnings and economic calendar endpoints, Nasdaq earnings calendar enrichment for before-market and after-hours timing, and company IR press releases when configured:
 
 ```text
 https://financialmodelingprep.com/stable/earnings-calendar
 https://financialmodelingprep.com/stable/economic-calendar
 https://api.nasdaq.com/api/calendar/earnings
+Company IR press release RSS feeds from `watchlist.yaml`
 ```
 
 Create an API key at Financial Modeling Prep, then add it to the GitHub repository:
@@ -81,6 +82,7 @@ Apple does not document this as a stable public integration, so TradingView HTTP
 
 - The calendar window is today through the next 30 days.
 - If the data source provides a precise time, the event is timed in `America/New_York`.
+- If a company IR press release provides a webcast/conference-call time, that official time and URL override other earnings sources.
 - If FMP does not provide before/after timing, Nasdaq earnings calendar is used automatically to enrich `盘前` / `盘后`.
 - If the data source only provides before-market or after-market status, the event is timed with a default New York time so iOS converts it correctly for local time zones: `盘前` -> `08:00`, `盘后` -> `16:05`, `盘中` -> `12:00`.
 - If timing is unknown, the title says `时间待定`.

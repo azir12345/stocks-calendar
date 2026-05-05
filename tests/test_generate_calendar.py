@@ -10,6 +10,7 @@ from scripts.generate_calendar import (
     build_economic_events,
     format_revenue_estimate,
     load_earnings_rows,
+    parse_official_earnings_text,
     render_ics,
 )
 
@@ -149,6 +150,43 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertEqual(dt.time(16, 5), events[0].start.time())
         self.assertIn("财报时间来源: Nasdaq Earnings Calendar", events[0].description)
         self.assertIn("时间精度: 盘后标记，默认映射 16:05 America/New_York", events[0].description)
+
+    def test_official_ir_text_extracts_webcast_time(self):
+        text = (
+            "AMD announced today that it will report fiscal first quarter 2026 financial results "
+            "on Tuesday, May 5, 2026, after the market close. Management will conduct a "
+            "conference call to discuss these results at 5:00 p.m. ET / 2:00 p.m. PT."
+        )
+        parsed = parse_official_earnings_text(text, dt.date(2026, 5, 5))
+
+        self.assertEqual("17:00", parsed["time"])
+        self.assertEqual("after", parsed["session"])
+        self.assertEqual("Company official IR", parsed["timePrecision"])
+
+    def test_official_ir_overrides_event_url_and_time(self):
+        rows = [
+            {
+                "symbol": "AMD",
+                "date": "2026-05-05",
+                "session": "after",
+                "time": "17:00",
+                "sessionSource": "Company official IR",
+                "timePrecision": "Company official IR",
+                "officialUrl": "https://ir.amd.com/news-events/press-releases/detail/1282/amd-to-report-fiscal-first-quarter-2026-financial-results",
+            }
+        ]
+        events = build_earnings_events(
+            rows=rows,
+            watch_symbols=[WatchSymbol(symbol="AMD", name="Advanced Micro Devices", tradingview="NASDAQ:AMD")],
+            timezone="America/New_York",
+            reminder_days=1,
+            timed_event_minutes=30,
+            links_config={},
+        )
+
+        self.assertEqual(dt.time(17, 0), events[0].start.time())
+        self.assertEqual("https://ir.amd.com/news-events/press-releases/detail/1282/amd-to-report-fiscal-first-quarter-2026-financial-results", events[0].url)
+        self.assertIn("官方财报页面:", events[0].description)
 
 
 if __name__ == "__main__":

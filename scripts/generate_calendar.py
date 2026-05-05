@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+import html
+import xml.etree.ElementTree as ET
 import json
 import os
 import re
@@ -13,6 +15,7 @@ import sys
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -212,6 +215,8 @@ class WatchSymbol:
     symbol: str
     name: str | None = None
     tradingview: str | None = None
+    ir_url: str | None = None
+    ir_press_releases_rss: str | None = None
 
 
 @dataclass(frozen=True)
@@ -265,6 +270,7 @@ def main() -> int:
     nasdaq_enrichment_enabled = config.get("earnings", {}).get("enrichment", {}).get("nasdaq", {}).get("enabled", False)
     if nasdaq_enrichment_enabled:
         earnings_rows = enrich_earnings_rows_with_nasdaq(earnings_rows, timezone)
+    earnings_rows = enrich_earnings_rows_with_official_ir(earnings_rows, watch_symbols, timezone)
     events = build_earnings_events(
         rows=earnings_rows,
         watch_symbols=watch_symbols,
@@ -397,6 +403,8 @@ def load_watchlist(path: Path) -> list[WatchSymbol]:
                 symbol=symbol,
                 name=as_optional_str(item.get("name")),
                 tradingview=as_optional_str(item.get("tradingview")),
+                ir_url=as_optional_str(item.get("ir_url")),
+                ir_press_releases_rss=as_optional_str(item.get("ir_press_releases_rss")),
             )
         )
 
@@ -521,6 +529,201 @@ def find_nasdaq_row(rows: list[dict[str, Any]], symbol: str) -> dict[str, Any] |
     return None
 
 
+def enrich_earnings_rows_with_official_ir(
+    rows: list[dict[str, Any]],
+    watch_symbols: list[WatchSymbol],
+    timezone: str,
+) -> list[dict[str, Any]]:
+    watch_by_symbol = {item.symbol: item for item in watch_symbols}
+    enriched: list[dict[str, Any]] = []
+    for row in rows:
+        updated = dict(row)
+        symbol = str(updated.get("symbol", "")).upper()
+        watch_item = watch_by_symbol.get(symbol)
+        if watch_item is None:
+            enriched.append(updated)
+            continue
+        event_date, _ = parse_earnings_datetime(updated, timezone)
+        if event_date is None:
+            enriched.append(updated)
+            continue
+        official = find_official_ir_earnings_info(watch_item, event_date)
+        if official:
+            updated.update(official)
+        enriched.append(updated)
+    return enriched
+
+
+def find_official_ir_earnings_info(watch_item: WatchSymbol, event_date: dt.date) -> dict[str, Any] | None:
+    if not watch_item.ir_press_releases_rss:
+        return None
+    try:
+        links = load_ir_press_release_links(watch_item.ir_press_releases_rss)
+    except Exception as exc:
+        print(f"WARNING: official IR RSS failed for {watch_item.symbol}: {exc}", file=sys.stderr)
+        return None
+    for link in links:
+        if not looks_like_earnings_release_link(link):
+            continue
+        try:
+            page_text = html_to_text(fetch_text_url(link))
+        except Exception as exc:
+            print(f"WARNING: official IR page failed for {watch_item.symbol} {link}: {exc}", file=sys.stderr)
+            continue
+        parsed = parse_official_earnings_text(page_text, event_date)
+        if parsed:
+            parsed["officialUrl"] = link
+            parsed["url"] = link
+            parsed["sessionSource"] = "Company official IR"
+            return parsed
+    return None
+
+
+def load_ir_press_release_links(rss_url: str) -> list[str]:
+    xml_text = fetch_text_url(rss_url)
+    root = ET.fromstring(xml_text)
+    links: list[str] = []
+    for item in root.findall(".//item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        if link and looks_like_earnings_release_title(title):
+            links.append(link)
+    return links
+
+
+def fetch_text_url(url: str) -> str:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; stocks-calendar/1.0)",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+def looks_like_earnings_release_title(title: str) -> bool:
+    normalized = title.lower()
+    return (
+        "financial results" in normalized
+        or "earnings" in normalized
+        or "quarter" in normalized and "results" in normalized
+    )
+
+
+def looks_like_earnings_release_link(link: str) -> bool:
+    normalized = link.lower()
+    return "financial-results" in normalized or "earnings" in normalized or "results" in normalized
+
+
+class TextExtractingHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        text = data.strip()
+        if text:
+            self.parts.append(text)
+
+
+def html_to_text(raw_html: str) -> str:
+    parser = TextExtractingHTMLParser()
+    parser.feed(raw_html)
+    return html.unescape(" ".join(parser.parts))
+
+
+def parse_official_earnings_text(text: str, event_date: dt.date) -> dict[str, Any] | None:
+    normalized = re.sub(r"\s+", " ", text)
+    if not text_mentions_date(normalized, event_date):
+        return None
+    lowered = normalized.lower()
+    if "financial results" not in lowered and "earnings" not in lowered:
+        return None
+    official_time = extract_official_earnings_time(normalized)
+    session = "unknown"
+    if "after the market close" in lowered or "after market close" in lowered:
+        session = "after"
+    elif "before the market open" in lowered or "before market open" in lowered:
+        session = "before"
+    elif official_time:
+        session = infer_session_from_time(official_time)
+    if official_time is None and session == "unknown":
+        return None
+    result: dict[str, Any] = {
+        "timePrecision": "Company official IR",
+    }
+    if official_time:
+        result["time"] = official_time.strftime("%H:%M")
+    elif session == "after":
+        result["time"] = "16:05"
+    elif session == "before":
+        result["time"] = "08:00"
+    if session != "unknown":
+        result["session"] = session
+    return result
+
+
+def text_mentions_date(text: str, event_date: dt.date) -> bool:
+    month_name = event_date.strftime("%B")
+    month_abbr = event_date.strftime("%b")
+    day = event_date.day
+    year = event_date.year
+    patterns = (
+        rf"\b{month_name}\s+0?{day},\s+{year}\b",
+        rf"\b{month_abbr}\.?\s+0?{day},\s+{year}\b",
+        rf"\b{event_date.month}/0?{day}/{year}\b",
+        rf"\b{event_date.month}/0?{day}/{str(year)[-2:]}\b",
+    )
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def extract_official_earnings_time(text: str) -> dt.time | None:
+    priority_windows = []
+    lowered = text.lower()
+    for keyword in ("conference call", "webcast", "management will conduct", "discuss these results"):
+        index = lowered.find(keyword)
+        if index >= 0:
+            priority_windows.append(text[index : index + 300])
+    priority_windows.append(text)
+    for window in priority_windows:
+        parsed = find_time_with_timezone(window, preferred_zones=("et", "edt", "est"))
+        if parsed:
+            return parsed
+    return None
+
+
+def find_time_with_timezone(text: str, preferred_zones: tuple[str, ...]) -> dt.time | None:
+    pattern = re.compile(
+        r"\b(\d{1,2})(?::([0-5]\d))?\s*(a\.m\.|p\.m\.|am|pm)\s*(ET|EDT|EST|PT|PDT|PST)\b",
+        flags=re.IGNORECASE,
+    )
+    matches = list(pattern.finditer(text))
+    for match in matches:
+        zone = match.group(4).lower()
+        if zone in preferred_zones:
+            return convert_time_match_to_new_york(match)
+    if matches:
+        return convert_time_match_to_new_york(matches[0])
+    return None
+
+
+def convert_time_match_to_new_york(match: re.Match[str]) -> dt.time:
+    hour = int(match.group(1))
+    minute = int(match.group(2) or "0")
+    meridiem = match.group(3).lower()
+    zone = match.group(4).lower()
+    if meridiem.startswith("p") and hour != 12:
+        hour += 12
+    if meridiem.startswith("a") and hour == 12:
+        hour = 0
+    if zone in {"pt", "pdt", "pst"}:
+        hour += 3
+    hour %= 24
+    return dt.time(hour, minute)
+
+
 def build_earnings_events(
     *,
     rows: list[dict[str, Any]],
@@ -632,6 +835,8 @@ def parse_explicit_time(row: dict[str, Any]) -> dt.time | None:
 
 def detect_session(row: dict[str, Any]) -> str:
     raw_values = " ".join(str(row.get(key, "")) for key in ("time", "when", "session", "publicationTime")).lower()
+    if "session" in row and str(row.get("session")).lower() in {"before", "after", "during"}:
+        return str(row.get("session")).lower()
     if any(token in raw_values for token in ("bmo", "before", "pre-market", "pre market", "time-pre-market", "盘前")):
         return "before"
     if any(token in raw_values for token in ("amc", "after", "post-market", "post market", "time-after-hours", "盘后")):
@@ -713,8 +918,14 @@ def build_earnings_description(
     session_source = as_optional_str(row.get("sessionSource"))
     if session_source:
         lines.append(f"财报时间来源: {session_source}")
+    official_url = as_optional_str(row.get("officialUrl"))
+    if official_url:
+        lines.append(f"官方财报页面: {official_url}")
     default_time = default_time_for_session(session_from_label(session_label))
-    if used_default_session_time and default_time is not None:
+    time_precision = as_optional_str(row.get("timePrecision"))
+    if time_precision:
+        lines.append(f"时间精度: {time_precision}")
+    elif used_default_session_time and default_time is not None:
         lines.append(f"时间精度: {session_label}标记，默认映射 {default_time.strftime('%H:%M')} America/New_York，非官方分钟级发布时间")
     elif used_precise_time:
         lines.append("时间精度: 数据源提供具体时间")
@@ -723,9 +934,12 @@ def build_earnings_description(
 
     primary_url: str | None = None
 
+    if official_url:
+        primary_url = official_url
     if links_config.get("include_tradingview", True):
         lines.append(f"TradingView: {tradingview_url}")
-        primary_url = tradingview_url
+        if primary_url is None:
+            primary_url = tradingview_url
 
     source_url = first_existing(row, ("url", "sourceUrl"))
     if source_url:

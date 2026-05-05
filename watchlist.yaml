@@ -8,6 +8,8 @@ symbols:
   - symbol: AMD
     name: Advanced Micro Devices
     tradingview: NASDAQ:AMD
+    ir_url: https://ir.amd.com/news-events/ir-calendar
+    ir_press_releases_rss: https://ir.amd.com/news-events/press-releases/rss
   - symbol: SNDK
     name: SanDisk
     tradingview: NASDAQ:SNDK
