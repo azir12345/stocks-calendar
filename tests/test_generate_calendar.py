@@ -163,6 +163,29 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertEqual("after", parsed["session"])
         self.assertEqual("Company official IR", parsed["timePrecision"])
 
+    def test_official_ir_text_accepts_yearless_event_date_with_year_context(self):
+        text = (
+            "NVIDIA will host a conference call on Wednesday, May 20, at 2 p.m. PT "
+            "(5 p.m. ET) to discuss its financial results for the first quarter of fiscal "
+            "year 2027, which ended April 26, 2026."
+        )
+        parsed = parse_official_earnings_text(text, dt.date(2026, 5, 20))
+
+        self.assertEqual("17:00", parsed["time"])
+        self.assertEqual("after", parsed["session"])
+        self.assertEqual("Company official IR", parsed["timePrecision"])
+
+    def test_official_ir_text_converts_full_us_timezone_names(self):
+        text = (
+            "Interactive Brokers Group plans to announce its first quarter financial results "
+            "on Tuesday, April 21, 2026, in a release that will be issued at approximately "
+            "4:00 p.m. Central Time. A conference call will be held at 4:30 p.m. Central Time."
+        )
+        parsed = parse_official_earnings_text(text, dt.date(2026, 4, 21))
+
+        self.assertEqual("17:30", parsed["time"])
+        self.assertEqual("after", parsed["session"])
+
     def test_official_ir_overrides_event_url_and_time(self):
         rows = [
             {

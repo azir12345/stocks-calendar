@@ -555,27 +555,43 @@ def enrich_earnings_rows_with_official_ir(
 
 
 def find_official_ir_earnings_info(watch_item: WatchSymbol, event_date: dt.date) -> dict[str, Any] | None:
-    if not watch_item.ir_press_releases_rss:
+    if not watch_item.ir_press_releases_rss and not watch_item.ir_url:
         return None
-    try:
-        links = load_ir_press_release_links(watch_item.ir_press_releases_rss)
-    except Exception as exc:
-        print(f"WARNING: official IR RSS failed for {watch_item.symbol}: {exc}", file=sys.stderr)
-        return None
-    for link in links:
-        if not looks_like_earnings_release_link(link):
-            continue
+    links: list[str] = []
+    if watch_item.ir_press_releases_rss:
         try:
-            page_text = html_to_text(fetch_text_url(link))
+            links.extend(load_ir_press_release_links(watch_item.ir_press_releases_rss))
         except Exception as exc:
-            print(f"WARNING: official IR page failed for {watch_item.symbol} {link}: {exc}", file=sys.stderr)
-            continue
-        parsed = parse_official_earnings_text(page_text, event_date)
+            print(f"WARNING: official IR RSS failed for {watch_item.symbol}: {exc}", file=sys.stderr)
+    if watch_item.ir_url:
+        try:
+            links.extend(load_ir_page_release_links(watch_item.ir_url))
+        except Exception as exc:
+            print(f"WARNING: official IR page index failed for {watch_item.symbol}: {exc}", file=sys.stderr)
+    links = dedupe_urls(links)
+    for link in links[:30]:
+        parsed = parse_official_ir_page(link, event_date, watch_item.symbol)
         if parsed:
-            parsed["officialUrl"] = link
-            parsed["url"] = link
-            parsed["sessionSource"] = "Company official IR"
             return parsed
+    if watch_item.ir_url:
+        parsed = parse_official_ir_page(watch_item.ir_url, event_date, watch_item.symbol)
+        if parsed:
+            return parsed
+    return None
+
+
+def parse_official_ir_page(url: str, event_date: dt.date, symbol: str) -> dict[str, Any] | None:
+    try:
+        page_text = html_to_text(fetch_text_url(url))
+    except Exception as exc:
+        print(f"WARNING: official IR page failed for {symbol} {url}: {exc}", file=sys.stderr)
+        return None
+    parsed = parse_official_earnings_text(page_text, event_date)
+    if parsed:
+        parsed["officialUrl"] = url
+        parsed["url"] = url
+        parsed["sessionSource"] = "Company official IR"
+        return parsed
     return None
 
 
@@ -588,7 +604,43 @@ def load_ir_press_release_links(rss_url: str) -> list[str]:
         link = (item.findtext("link") or "").strip()
         if link and looks_like_earnings_release_title(title):
             links.append(link)
-    return links
+    for entry in root.findall(".//{http://www.w3.org/2005/Atom}entry"):
+        title = (entry.findtext("{http://www.w3.org/2005/Atom}title") or "").strip()
+        link = ""
+        for link_node in entry.findall("{http://www.w3.org/2005/Atom}link"):
+            candidate = (link_node.attrib.get("href") or "").strip()
+            if candidate:
+                link = candidate
+                break
+        if link and looks_like_earnings_release_title(title):
+            links.append(link)
+    return dedupe_urls(links)
+
+
+def load_ir_page_release_links(page_url: str) -> list[str]:
+    raw_html = fetch_text_url(page_url)
+    parser = LinkExtractingHTMLParser()
+    parser.feed(raw_html)
+    links: list[str] = []
+    for href, label in parser.links:
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        absolute_url = urllib.parse.urljoin(page_url, html.unescape(href))
+        if looks_like_earnings_release_title(label) or looks_like_earnings_release_link(absolute_url):
+            links.append(absolute_url)
+    return dedupe_urls(links)
+
+
+def dedupe_urls(urls: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        normalized = url.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
 
 
 def fetch_text_url(url: str) -> str:
@@ -634,14 +686,43 @@ def html_to_text(raw_html: str) -> str:
     return html.unescape(" ".join(parser.parts))
 
 
+class LinkExtractingHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[tuple[str, str]] = []
+        self.current_href: str | None = None
+        self.current_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "a":
+            return
+        attrs_by_name = {name.lower(): value for name, value in attrs}
+        self.current_href = attrs_by_name.get("href")
+        self.current_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self.current_href:
+            text = data.strip()
+            if text:
+                self.current_parts.append(text)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "a" and self.current_href:
+            self.links.append((self.current_href, " ".join(self.current_parts)))
+            self.current_href = None
+            self.current_parts = []
+
+
 def parse_official_earnings_text(text: str, event_date: dt.date) -> dict[str, Any] | None:
     normalized = re.sub(r"\s+", " ", text)
-    if not text_mentions_date(normalized, event_date):
+    date_contexts = event_date_contexts(normalized, event_date)
+    if not date_contexts:
         return None
-    lowered = normalized.lower()
+    relevant_text = " ".join(date_contexts)
+    lowered = relevant_text.lower()
     if "financial results" not in lowered and "earnings" not in lowered:
         return None
-    official_time = extract_official_earnings_time(normalized)
+    official_time = extract_official_earnings_time(relevant_text)
     session = "unknown"
     if "after the market close" in lowered or "after market close" in lowered:
         session = "after"
@@ -666,17 +747,44 @@ def parse_official_earnings_text(text: str, event_date: dt.date) -> dict[str, An
 
 
 def text_mentions_date(text: str, event_date: dt.date) -> bool:
+    return bool(event_date_contexts(text, event_date))
+
+
+def event_date_contexts(text: str, event_date: dt.date) -> list[str]:
+    patterns = event_date_patterns(text, event_date)
+    contexts: list[str] = []
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            start = max(0, match.start() - 450)
+            end = min(len(text), match.end() + 550)
+            contexts.append(text[start:end])
+    return contexts
+
+
+def event_date_patterns(text: str, event_date: dt.date) -> tuple[str, ...]:
     month_name = event_date.strftime("%B")
     month_abbr = event_date.strftime("%b")
     day = event_date.day
     year = event_date.year
-    patterns = (
+    exact_year_patterns = (
         rf"\b{month_name}\s+0?{day},\s+{year}\b",
         rf"\b{month_abbr}\.?\s+0?{day},\s+{year}\b",
         rf"\b{event_date.month}/0?{day}/{year}\b",
         rf"\b{event_date.month}/0?{day}/{str(year)[-2:]}\b",
     )
-    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+    if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in exact_year_patterns):
+        return exact_year_patterns
+
+    if str(year) not in text:
+        return ()
+
+    weekday = event_date.strftime("%A")
+    return (
+        rf"\b{weekday},\s+{month_name}\s+0?{day}\b",
+        rf"\b{weekday},\s+{month_abbr}\.?\s+0?{day}\b",
+        rf"\b{month_name}\s+0?{day}\b",
+        rf"\b{month_abbr}\.?\s+0?{day}\b",
+    )
 
 
 def extract_official_earnings_time(text: str) -> dt.time | None:
@@ -696,12 +804,13 @@ def extract_official_earnings_time(text: str) -> dt.time | None:
 
 def find_time_with_timezone(text: str, preferred_zones: tuple[str, ...]) -> dt.time | None:
     pattern = re.compile(
-        r"\b(\d{1,2})(?::([0-5]\d))?\s*(a\.m\.|p\.m\.|am|pm)\s*(ET|EDT|EST|PT|PDT|PST)\b",
+        r"\b(\d{1,2})(?::([0-5]\d))?\s*(a\.m\.|p\.m\.|am|pm)\s*"
+        r"\(?\s*(ET|EDT|EST|Eastern\s+Time|PT|PDT|PST|Pacific\s+Time|CT|CDT|CST|Central\s+Time|MT|MDT|MST|Mountain\s+Time)\b\s*\)?",
         flags=re.IGNORECASE,
     )
     matches = list(pattern.finditer(text))
     for match in matches:
-        zone = match.group(4).lower()
+        zone = normalize_us_timezone(match.group(4))
         if zone in preferred_zones:
             return convert_time_match_to_new_york(match)
     if matches:
@@ -713,15 +822,29 @@ def convert_time_match_to_new_york(match: re.Match[str]) -> dt.time:
     hour = int(match.group(1))
     minute = int(match.group(2) or "0")
     meridiem = match.group(3).lower()
-    zone = match.group(4).lower()
+    zone = normalize_us_timezone(match.group(4))
     if meridiem.startswith("p") and hour != 12:
         hour += 12
     if meridiem.startswith("a") and hour == 12:
         hour = 0
     if zone in {"pt", "pdt", "pst"}:
         hour += 3
+    elif zone in {"ct", "cdt", "cst"}:
+        hour += 1
+    elif zone in {"mt", "mdt", "mst"}:
+        hour += 2
     hour %= 24
     return dt.time(hour, minute)
+
+
+def normalize_us_timezone(value: str) -> str:
+    normalized = re.sub(r"\s+", " ", value.strip().lower())
+    return {
+        "eastern time": "et",
+        "pacific time": "pt",
+        "central time": "ct",
+        "mountain time": "mt",
+    }.get(normalized, normalized)
 
 
 def build_earnings_events(

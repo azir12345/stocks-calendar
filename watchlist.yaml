@@ -2,9 +2,13 @@ symbols:
   - symbol: INTC
     name: Intel
     tradingview: NASDAQ:INTC
+    ir_url: https://www.intc.com/news-events/press-releases
+    ir_press_releases_rss: https://www.intc.com/news-events/press-releases/rss
   - symbol: NVDA
     name: NVIDIA
     tradingview: NASDAQ:NVDA
+    ir_url: https://investor.nvidia.com/news/press-releases/default.aspx
+    ir_press_releases_rss: https://nvidianews.nvidia.com/rss.xml
   - symbol: AMD
     name: Advanced Micro Devices
     tradingview: NASDAQ:AMD
@@ -13,21 +17,28 @@ symbols:
   - symbol: SNDK
     name: SanDisk
     tradingview: NASDAQ:SNDK
+    ir_url: https://investor.sandisk.com/
+    ir_press_releases_rss: https://investor.sandisk.com/rss/news-releases.xml
   - symbol: STX
     name: Seagate Technology
     tradingview: NASDAQ:STX
   - symbol: WDC
     name: Western Digital
     tradingview: NASDAQ:WDC
+    ir_url: https://investor.wdc.com/news-releases
+    ir_press_releases_rss: https://investor.wdc.com/rss/news-releases.xml
   - symbol: HSBC
     name: HSBC
     tradingview: NYSE:HSBC
   - symbol: AAPL
     name: Apple
     tradingview: NASDAQ:AAPL
+    ir_url: https://www.apple.com/newsroom/
+    ir_press_releases_rss: https://www.apple.com/newsroom/rss-feed.rss
   - symbol: MSFT
     name: Microsoft
     tradingview: NASDAQ:MSFT
+    ir_url: https://www.microsoft.com/en-us/investor/earnings
   - symbol: TSLA
     name: Tesla
     tradingview: NASDAQ:TSLA
@@ -37,6 +48,7 @@ symbols:
   - symbol: IBKR
     name: Interactive Brokers
     tradingview: NASDAQ:IBKR
+    ir_url: https://www.interactivebrokers.com/en/general/about/press-releases.php
   - symbol: META
     name: Meta Platforms
     tradingview: NASDAQ:META
@@ -46,27 +58,40 @@ symbols:
   - symbol: AVGO
     name: Broadcom
     tradingview: NASDAQ:AVGO
+    ir_url: https://investors.broadcom.com/news-releases
+    ir_press_releases_rss: https://investors.broadcom.com/rss/news-releases.xml
   - symbol: QCOM
     name: Qualcomm
     tradingview: NASDAQ:QCOM
   - symbol: ARM
     name: Arm Holdings
     tradingview: NASDAQ:ARM
+    ir_url: https://investors.arm.com/news-events/press-releases
+    ir_press_releases_rss: https://investors.arm.com/rss/news-releases.xml
   - symbol: DELL
     name: Dell Technologies
     tradingview: NYSE:DELL
+    ir_url: https://investors.delltechnologies.com/news-releases
+    ir_press_releases_rss: https://investors.delltechnologies.com/rss/news-releases.xml
   - symbol: MU
     name: Micron Technology
     tradingview: NASDAQ:MU
+    ir_url: https://investors.micron.com/news-releases
+    ir_press_releases_rss: https://investors.micron.com/rss/news-releases.xml
   - symbol: GM
     name: General Motors
     tradingview: NYSE:GM
+    ir_url: https://investor.gm.com/news-releases
+    ir_press_releases_rss: https://investor.gm.com/rss/news-releases.xml
   - symbol: GE
     name: GE Aerospace
     tradingview: NYSE:GE
+    ir_url: https://www.geaerospace.com/investor-relations/ir-updates
   - symbol: IBM
     name: IBM
     tradingview: NYSE:IBM
+    ir_url: https://newsroom.ibm.com/
+    ir_press_releases_rss: https://newsroom.ibm.com/announcements?pagetemplate=rss
   - symbol: AMZN
     name: Amazon
     tradingview: NASDAQ:AMZN
