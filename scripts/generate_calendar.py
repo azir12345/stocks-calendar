@@ -215,6 +215,7 @@ class WatchSymbol:
     symbol: str
     name: str | None = None
     tradingview: str | None = None
+    timezone: str | None = None
     ir_url: str | None = None
     ir_press_releases_rss: str | None = None
 
@@ -370,6 +371,7 @@ def build_status(
         },
         "watchlist_count": len(watch_symbols),
         "watchlist_symbols": [item.symbol for item in watch_symbols],
+        "symbol_timezones": {item.symbol: item.timezone for item in watch_symbols if item.timezone},
         "event_counts": counts,
         "output_file": str(output_path),
         "data_sources": {
@@ -403,6 +405,7 @@ def load_watchlist(path: Path) -> list[WatchSymbol]:
                 symbol=symbol,
                 name=as_optional_str(item.get("name")),
                 tradingview=as_optional_str(item.get("tradingview")),
+                timezone=as_optional_str(item.get("timezone")),
                 ir_url=as_optional_str(item.get("ir_url")),
                 ir_press_releases_rss=as_optional_str(item.get("ir_press_releases_rss")),
             )
@@ -543,7 +546,7 @@ def enrich_earnings_rows_with_official_ir(
         if watch_item is None:
             enriched.append(updated)
             continue
-        event_date, _ = parse_earnings_datetime(updated, timezone)
+        event_date, _ = parse_earnings_datetime(updated, earnings_timezone(watch_item, timezone))
         if event_date is None:
             enriched.append(updated)
             continue
@@ -864,7 +867,9 @@ def build_earnings_events(
         if symbol not in watch_by_symbol:
             continue
 
-        event_date, precise_time = parse_earnings_datetime(row, timezone)
+        watch_item = watch_by_symbol[symbol]
+        event_timezone = earnings_timezone(watch_item, timezone)
+        event_date, precise_time = parse_earnings_datetime(row, event_timezone)
         if event_date is None:
             continue
 
@@ -872,7 +877,6 @@ def build_earnings_events(
         if session == "unknown" and precise_time is not None:
             session = infer_session_from_time(precise_time)
         session_label = session_label_cn(session)
-        watch_item = watch_by_symbol[symbol]
         company_name = get_company_name(row, watch_item)
         title_name = f"{company_name} ({symbol})" if company_name else symbol
         title = f"{title_name} 财报 - {session_label}"
@@ -883,7 +887,7 @@ def build_earnings_events(
             end: dt.date | dt.datetime = event_date + dt.timedelta(days=1)
             all_day = True
         else:
-            start = dt.datetime.combine(event_date, effective_time, tzinfo=ZoneInfo(timezone))
+            start = dt.datetime.combine(event_date, effective_time, tzinfo=ZoneInfo(event_timezone))
             end = start + dt.timedelta(minutes=timed_event_minutes)
             all_day = False
 
@@ -892,6 +896,7 @@ def build_earnings_events(
             watch_item=watch_item,
             symbol=symbol,
             session_label=session_label,
+            event_timezone=event_timezone,
             links_config=links_config,
             used_default_session_time=precise_time is None and effective_time is not None,
             used_precise_time=precise_time is not None,
@@ -903,7 +908,7 @@ def build_earnings_events(
                 start=start,
                 end=end,
                 all_day=all_day,
-                timezone=timezone,
+                timezone=event_timezone,
                 description=description,
                 url=primary_url,
                 reminder_days_before=reminder_days,
@@ -911,6 +916,10 @@ def build_earnings_events(
         )
 
     return events
+
+
+def earnings_timezone(watch_item: WatchSymbol, default_timezone: str) -> str:
+    return watch_item.timezone or default_timezone
 
 
 def parse_earnings_datetime(row: dict[str, Any], timezone: str) -> tuple[dt.date | None, dt.time | None]:
@@ -1024,13 +1033,14 @@ def build_earnings_description(
     watch_item: WatchSymbol,
     symbol: str,
     session_label: str,
+    event_timezone: str,
     links_config: dict[str, Any],
     used_default_session_time: bool = False,
     used_precise_time: bool = False,
 ) -> tuple[str, str | None]:
     tradingview_url = tradingview_link(watch_item, symbol)
     apple_stocks_url = f"stocks://?symbol={urllib.parse.quote(symbol)}"
-    lines = [f"Apple Stocks: {apple_stocks_url}", f"Ticker: {symbol}", f"财报时间: {session_label}"]
+    lines = [f"Apple Stocks: {apple_stocks_url}", f"Ticker: {symbol}", f"交易所时区: {event_timezone}", f"财报时间: {session_label}"]
 
     eps = first_existing(row, ("epsEstimated", "epsEstimate", "epsConsensus"))
     revenue = first_existing(row, ("revenueEstimated", "revenueEstimate", "revenueConsensus"))
@@ -1049,7 +1059,7 @@ def build_earnings_description(
     if time_precision:
         lines.append(f"时间精度: {time_precision}")
     elif used_default_session_time and default_time is not None:
-        lines.append(f"时间精度: {session_label}标记，默认映射 {default_time.strftime('%H:%M')} America/New_York，非官方分钟级发布时间")
+        lines.append(f"时间精度: {session_label}标记，默认映射 {default_time.strftime('%H:%M')} {event_timezone}，非官方分钟级发布时间")
     elif used_precise_time:
         lines.append("时间精度: 数据源提供具体时间")
     else:

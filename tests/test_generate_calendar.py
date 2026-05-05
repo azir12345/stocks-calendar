@@ -103,6 +103,38 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertIn("DTSTART;TZID=America/New_York:20260512T160500", ics)
         self.assertIn("TRIGGER:-P1D", ics)
 
+    def test_earnings_can_use_symbol_local_exchange_timezone(self):
+        rows = [
+            {
+                "symbol": "005930.KS",
+                "date": "2026-05-12",
+                "time": "bmo",
+            }
+        ]
+        events = build_earnings_events(
+            rows=rows,
+            watch_symbols=[
+                WatchSymbol(
+                    symbol="005930.KS",
+                    name="Samsung Electronics",
+                    tradingview="KRX:005930",
+                    timezone="Asia/Seoul",
+                )
+            ],
+            timezone="America/New_York",
+            reminder_days=1,
+            timed_event_minutes=30,
+            links_config={},
+        )
+        ics = render_ics("Test", "Test calendar", events)
+
+        self.assertEqual("Samsung Electronics (005930.KS) 财报 - 盘前", events[0].title)
+        self.assertEqual("Asia/Seoul", events[0].timezone)
+        self.assertEqual(dt.time(8, 0), events[0].start.time())
+        self.assertEqual("https://www.tradingview.com/chart/?symbol=KRX%3A005930", events[0].url)
+        self.assertIn("交易所时区: Asia/Seoul", events[0].description)
+        self.assertIn("DTSTART;TZID=Asia/Seoul:20260512T080000", ics)
+
     def test_economic_events_include_impact_logic_and_expected_direction(self):
         rows = json.loads((ROOT / "tests/fixtures/fmp_economic.json").read_text(encoding="utf-8"))
         events = build_economic_events(rows, timezone="America/New_York", reminder_days=1)

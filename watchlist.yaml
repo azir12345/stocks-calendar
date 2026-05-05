@@ -30,6 +30,9 @@ symbols:
   - symbol: HSBC
     name: HSBC
     tradingview: NYSE:HSBC
+  - symbol: NOK
+    name: Nokia
+    tradingview: NYSE:NOK
   - symbol: AAPL
     name: Apple
     tradingview: NASDAQ:AAPL
@@ -55,6 +58,9 @@ symbols:
   - symbol: TSM
     name: Taiwan Semiconductor Manufacturing
     tradingview: NYSE:TSM
+  - symbol: STM
+    name: STMicroelectronics
+    tradingview: NYSE:STM
   - symbol: AVGO
     name: Broadcom
     tradingview: NASDAQ:AVGO
@@ -95,3 +101,17 @@ symbols:
   - symbol: AMZN
     name: Amazon
     tradingview: NASDAQ:AMZN
+  - symbol: TM
+    name: Toyota Motor
+    tradingview: NYSE:TM
+  - symbol: PFE
+    name: Pfizer
+    tradingview: NYSE:PFE
+  - symbol: 000660.KS
+    name: SK hynix
+    tradingview: KRX:000660
+    timezone: Asia/Seoul
+  - symbol: 005930.KS
+    name: Samsung Electronics
+    tradingview: KRX:005930
+    timezone: Asia/Seoul

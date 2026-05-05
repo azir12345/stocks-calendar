@@ -1,6 +1,6 @@
 calendar:
-  name: US Market Watchlist
-  description: Rolling 30-day earnings and market-events calendar for the configured watchlist.
+  name: Market Watchlist
+  description: Rolling 30-day earnings and US market-events calendar for the configured watchlist.
   timezone: America/New_York
   window_days: 30
   timed_event_minutes: 30

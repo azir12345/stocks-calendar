@@ -1,6 +1,6 @@
 # stocks-calendar
 
-Generate a rolling 30-day iCalendar feed for US stock earnings and key market events.
+Generate a rolling 30-day iCalendar feed for watchlist earnings and key US market events.
 
 The feed is built for iOS Calendar subscriptions through GitHub Pages. Update `watchlist.yaml`, set an FMP API key in GitHub Secrets, and GitHub Actions publishes `public/earnings.ics` once per day.
 
@@ -78,13 +78,25 @@ stocks://?symbol=AAPL
 
 Apple does not document this as a stable public integration, so TradingView HTTPS links are the reliable fallback.
 
+Non-US earnings can use a per-symbol exchange timezone:
+
+```yaml
+symbols:
+  - symbol: 005930.KS
+    name: Samsung Electronics
+    tradingview: KRX:005930
+    timezone: Asia/Seoul
+```
+
+When `timezone` is present, earnings events for that symbol are written with that local exchange timezone, for example `DTSTART;TZID=Asia/Seoul`. US macro events remain controlled by `config.yaml` and are still limited to the configured US economic calendar countries.
+
 ## Timing Rules
 
 - The calendar window is today through the next 30 days.
-- If the data source provides a precise time, the event is timed in `America/New_York`.
+- If the data source provides a precise time, the event is timed in the symbol's configured exchange timezone, or `America/New_York` when the symbol has no override.
 - If a company IR press release/page provides an official release, webcast, or conference-call time, that official timing is used ahead of FMP and Nasdaq timing.
 - If FMP does not provide before/after timing, Nasdaq earnings calendar is used automatically to enrich `盘前` / `盘后`.
-- If the data source only provides before-market or after-market status, the event is timed with a default New York time so iOS converts it correctly for local time zones: `盘前` -> `08:00`, `盘后` -> `16:05`, `盘中` -> `12:00`.
+- If the data source only provides before-market or after-market status, the event is timed with the symbol's exchange timezone so iOS converts it correctly for local time zones: `盘前` -> `08:00`, `盘后` -> `16:05`, `盘中` -> `12:00`.
 - If timing is unknown, the title says `时间待定`.
 - Earnings descriptions include `时间精度` so inferred session times are not confused with official minute-level release times.
 - Each event includes a one-day-before `VALARM`.
