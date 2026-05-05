@@ -8,8 +8,10 @@ from scripts.generate_calendar import (
     apply_nasdaq_enrichment,
     build_earnings_events,
     build_economic_events,
+    extract_candidate_earnings_dates,
     format_revenue_estimate,
     load_earnings_rows,
+    merge_missing_official_ir_rows,
     parse_official_earnings_text,
     render_ics,
 )
@@ -168,6 +170,55 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertIn("财报查询代码: HSBA", events[0].description)
         self.assertIn("交易所时区: Europe/London", events[0].description)
         self.assertIn("DTSTART;TZID=Europe/London:20260512T080000", ics)
+
+    def test_official_ir_fallback_can_add_missing_adr_event(self):
+        watch_symbols = [
+            WatchSymbol(
+                symbol="HSBC",
+                name="HSBC",
+                tradingview="NYSE:HSBC",
+                earnings_symbols=("HSBC", "HSBA"),
+                earnings_timezone="Europe/London",
+            )
+        ]
+        fallback_rows = [
+            {
+                "symbol": "HSBC",
+                "date": "2026-05-05",
+                "time": "05:00",
+                "session": "before",
+                "timePrecision": "Company official IR",
+                "officialUrl": "https://www.hsbc.com/investors/results-and-announcements",
+                "sessionSource": "Company official IR",
+            }
+        ]
+
+        merged = merge_missing_official_ir_rows(
+            [],
+            fallback_rows,
+            watch_symbols=watch_symbols,
+            default_timezone="America/New_York",
+        )
+        events = build_earnings_events(
+            rows=merged,
+            watch_symbols=watch_symbols,
+            timezone="America/New_York",
+            reminder_days=1,
+            timed_event_minutes=30,
+            links_config={},
+        )
+
+        self.assertEqual(1, len(events))
+        self.assertEqual("Europe/London", events[0].timezone)
+        self.assertEqual(dt.time(5, 0), events[0].start.time())
+        self.assertIn("官方财报页面: https://www.hsbc.com/investors/results-and-announcements", events[0].description)
+
+    def test_extract_candidate_earnings_dates_accepts_uk_dates(self):
+        text = "1Q 2026 Earnings Release 05 May 2026. Another date is 2026-06-30."
+
+        dates = extract_candidate_earnings_dates(text, dt.date(2026, 5, 1), dt.date(2026, 5, 31))
+
+        self.assertEqual([dt.date(2026, 5, 5)], dates)
 
     def test_economic_events_include_impact_logic_and_expected_direction(self):
         rows = json.loads((ROOT / "tests/fixtures/fmp_economic.json").read_text(encoding="utf-8"))

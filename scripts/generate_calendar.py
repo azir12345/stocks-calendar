@@ -274,6 +274,18 @@ def main() -> int:
     if nasdaq_enrichment_enabled:
         earnings_rows = enrich_earnings_rows_with_nasdaq(earnings_rows, timezone)
     earnings_rows = enrich_earnings_rows_with_official_ir(earnings_rows, watch_symbols, timezone)
+    if not args.fixture:
+        earnings_rows = merge_missing_official_ir_rows(
+            earnings_rows,
+            load_official_ir_fallback_rows(
+                watch_symbols=watch_symbols,
+                start_date=today,
+                end_date=end_date,
+                default_timezone=timezone,
+            ),
+            watch_symbols=watch_symbols,
+            default_timezone=timezone,
+        )
     events = build_earnings_events(
         rows=earnings_rows,
         watch_symbols=watch_symbols,
@@ -625,6 +637,94 @@ def find_official_ir_earnings_info(watch_item: WatchSymbol, event_date: dt.date)
     return None
 
 
+def load_official_ir_fallback_rows(
+    *,
+    watch_symbols: list[WatchSymbol],
+    start_date: dt.date,
+    end_date: dt.date,
+    default_timezone: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in watch_symbols:
+        if not should_use_official_ir_fallback(item):
+            continue
+        for url in official_ir_fallback_urls(item):
+            try:
+                page_text = html_to_text(fetch_text_url(url))
+            except Exception as exc:
+                print(f"WARNING: official IR fallback page failed for {item.symbol} {url}: {exc}", file=sys.stderr)
+                continue
+            for event_date in extract_candidate_earnings_dates(page_text, start_date, end_date):
+                parsed = parse_official_earnings_text(page_text, event_date)
+                if not parsed:
+                    continue
+                row: dict[str, Any] = {
+                    "symbol": item.symbol,
+                    "date": event_date.isoformat(),
+                    "companyName": item.name,
+                    "officialUrl": url,
+                    "url": url,
+                    "sessionSource": "Company official IR",
+                    "source": "Company official IR fallback",
+                }
+                row.update(parsed)
+                rows.append(row)
+    return rows
+
+
+def should_use_official_ir_fallback(item: WatchSymbol) -> bool:
+    if not item.ir_url and not item.ir_press_releases_rss:
+        return False
+    return len(item.earnings_symbols or ()) > 1 or bool(item.earnings_timezone)
+
+
+def official_ir_fallback_urls(item: WatchSymbol) -> list[str]:
+    urls: list[str] = []
+    if item.ir_url:
+        urls.append(item.ir_url)
+    if item.ir_press_releases_rss:
+        try:
+            urls.extend(load_ir_press_release_links(item.ir_press_releases_rss)[:10])
+        except Exception as exc:
+            print(f"WARNING: official IR fallback RSS failed for {item.symbol}: {exc}", file=sys.stderr)
+    return dedupe_urls(urls)
+
+
+def merge_missing_official_ir_rows(
+    rows: list[dict[str, Any]],
+    fallback_rows: list[dict[str, Any]],
+    *,
+    watch_symbols: list[WatchSymbol],
+    default_timezone: str,
+) -> list[dict[str, Any]]:
+    existing_keys: set[tuple[str, dt.date]] = set()
+    watch_lookup = build_watch_symbol_lookup(watch_symbols)
+    for row in rows:
+        source_symbol = str(row.get("symbol", "")).strip().upper()
+        watch_item = watch_lookup.get(source_symbol)
+        if not watch_item:
+            continue
+        event_date, _ = parse_earnings_datetime(row, earnings_timezone(watch_item, default_timezone))
+        if event_date:
+            existing_keys.add((watch_item.symbol, event_date))
+
+    merged = list(rows)
+    for row in fallback_rows:
+        source_symbol = str(row.get("symbol", "")).strip().upper()
+        watch_item = watch_lookup.get(source_symbol)
+        if not watch_item:
+            continue
+        event_date, _ = parse_earnings_datetime(row, earnings_timezone(watch_item, default_timezone))
+        if not event_date:
+            continue
+        key = (watch_item.symbol, event_date)
+        if key in existing_keys:
+            continue
+        existing_keys.add(key)
+        merged.append(row)
+    return merged
+
+
 def parse_official_ir_page(url: str, event_date: dt.date, symbol: str) -> dict[str, Any] | None:
     try:
         page_text = html_to_text(fetch_text_url(url))
@@ -793,6 +893,66 @@ def parse_official_earnings_text(text: str, event_date: dt.date) -> dict[str, An
 
 def text_mentions_date(text: str, event_date: dt.date) -> bool:
     return bool(event_date_contexts(text, event_date))
+
+
+def extract_candidate_earnings_dates(text: str, start_date: dt.date, end_date: dt.date) -> list[dt.date]:
+    normalized = re.sub(r"\s+", " ", text)
+    month_names = {
+        "january": 1,
+        "jan": 1,
+        "february": 2,
+        "feb": 2,
+        "march": 3,
+        "mar": 3,
+        "april": 4,
+        "apr": 4,
+        "may": 5,
+        "june": 6,
+        "jun": 6,
+        "july": 7,
+        "jul": 7,
+        "august": 8,
+        "aug": 8,
+        "september": 9,
+        "sep": 9,
+        "sept": 9,
+        "october": 10,
+        "oct": 10,
+        "november": 11,
+        "nov": 11,
+        "december": 12,
+        "dec": 12,
+    }
+    dates: set[dt.date] = set()
+
+    for match in re.finditer(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", normalized):
+        add_candidate_date(dates, int(match.group(1)), int(match.group(2)), int(match.group(3)), start_date, end_date)
+
+    month_pattern = "|".join(sorted(month_names, key=len, reverse=True))
+    for match in re.finditer(rf"\b({month_pattern})\.?\s+(\d{{1,2}}),?\s+(\d{{4}})\b", normalized, flags=re.IGNORECASE):
+        month = month_names[match.group(1).lower().rstrip(".")]
+        add_candidate_date(dates, int(match.group(3)), month, int(match.group(2)), start_date, end_date)
+    for match in re.finditer(rf"\b(\d{{1,2}})\s+({month_pattern})\.?,?\s+(\d{{4}})\b", normalized, flags=re.IGNORECASE):
+        month = month_names[match.group(2).lower().rstrip(".")]
+        add_candidate_date(dates, int(match.group(3)), month, int(match.group(1)), start_date, end_date)
+
+    return sorted(dates)
+
+
+def add_candidate_date(
+    dates: set[dt.date],
+    year: int,
+    month: int,
+    day: int,
+    start_date: dt.date,
+    end_date: dt.date,
+) -> None:
+    try:
+        value = dt.date(year, month, day)
+    except ValueError:
+        return
+    if start_date <= value <= end_date:
+        dates.add(value)
 
 
 def event_date_contexts(text: str, event_date: dt.date) -> list[str]:
