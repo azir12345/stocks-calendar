@@ -49,7 +49,7 @@ Value: <your-api-key>
 
 Local `.env` files are ignored. Use `.env.example` as a reference only.
 
-The workflow fails fast when `FMP_API_KEY` is missing. That is intentional, because publishing an empty calendar would be worse.
+If FMP returns an authorization, payment, quota, or transient provider error, the workflow continues. It records the error in `public/status.json`, keeps any official IR/manual events it can still generate, and reuses the previously published `earnings.ics` when the degraded run would otherwise publish an empty calendar.
 
 ## Watchlist
 

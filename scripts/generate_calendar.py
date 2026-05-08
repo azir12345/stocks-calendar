@@ -262,14 +262,19 @@ def main() -> int:
 
     today = dt.datetime.now(ZoneInfo(timezone)).date()
     end_date = today + dt.timedelta(days=window_days)
+    warnings: list[str] = []
 
-    earnings_rows = load_earnings_rows(
-        config=config,
-        symbols=collect_earnings_symbols(watch_symbols),
-        start_date=today,
-        end_date=end_date,
-        fixture=args.fixture,
-    )
+    try:
+        earnings_rows = load_earnings_rows(
+            config=config,
+            symbols=collect_earnings_symbols(watch_symbols),
+            start_date=today,
+            end_date=end_date,
+            fixture=args.fixture,
+        )
+    except Exception as exc:
+        warn_runtime(warnings, f"Earnings provider failed; continuing with official IR fallback only: {exc}")
+        earnings_rows = []
     nasdaq_enrichment_enabled = config.get("earnings", {}).get("enrichment", {}).get("nasdaq", {}).get("enabled", False)
     if nasdaq_enrichment_enabled:
         earnings_rows = enrich_earnings_rows_with_nasdaq(earnings_rows, timezone)
@@ -302,6 +307,7 @@ def main() -> int:
                 end_date=end_date,
                 timezone=timezone,
                 reminder_days=reminder_days,
+                warnings=warnings,
             )
         )
     events.extend(load_manual_financial_events(root=root, config=config, default_timezone=timezone, reminder_days=reminder_days))
@@ -309,8 +315,14 @@ def main() -> int:
 
     calendar_name = str(calendar_config.get("name", "US Earnings Watchlist"))
     calendar_description = str(calendar_config.get("description", calendar_name))
+    calendar_text = reuse_previous_calendar_if_empty(
+        rendered_calendar=render_ics(calendar_name, calendar_description, events),
+        events=events,
+        warnings=warnings,
+        output_path=output_path,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(render_ics(calendar_name, calendar_description, events), encoding="utf-8")
+    output_path.write_text(calendar_text, encoding="utf-8")
     status_path.parent.mkdir(parents=True, exist_ok=True)
     status_path.write_text(
         json.dumps(
@@ -322,6 +334,7 @@ def main() -> int:
                 timezone=timezone,
                 output_path=output_path,
                 nasdaq_enrichment_enabled=nasdaq_enrichment_enabled,
+                warnings=warnings,
             ),
             ensure_ascii=False,
             indent=2,
@@ -355,6 +368,7 @@ def build_status(
     timezone: str,
     output_path: Path,
     nasdaq_enrichment_enabled: bool,
+    warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     counts = {
         "total": len(events),
@@ -392,6 +406,7 @@ def build_status(
         },
         "event_counts": counts,
         "output_file": str(output_path),
+        "warnings": warnings or [],
         "data_sources": {
             "earnings": "Financial Modeling Prep earnings-calendar",
             "earnings_session_enrichment": "Nasdaq earnings calendar" if nasdaq_enrichment_enabled else None,
@@ -399,6 +414,44 @@ def build_status(
             "holidays": "Financial Modeling Prep holidays-by-exchange",
         },
     }
+
+
+def warn_runtime(warnings: list[str] | None, message: str) -> None:
+    if warnings is not None:
+        warnings.append(message)
+    print(f"WARNING: {message}", file=sys.stderr)
+
+
+def reuse_previous_calendar_if_empty(
+    *,
+    rendered_calendar: str,
+    events: list[CalendarEvent],
+    warnings: list[str],
+    output_path: Path,
+) -> str:
+    if events or not warnings:
+        return rendered_calendar
+    previous_url = previous_published_calendar_url(output_path)
+    if previous_url is None:
+        return rendered_calendar
+    try:
+        previous_calendar = fetch_text_url(previous_url)
+    except Exception as exc:
+        warn_runtime(warnings, f"No events generated and previous calendar could not be fetched: {exc}")
+        return rendered_calendar
+    if "BEGIN:VCALENDAR" not in previous_calendar:
+        warn_runtime(warnings, f"No events generated and previous calendar response was not an ICS file: {previous_url}")
+        return rendered_calendar
+    warn_runtime(warnings, f"No events generated while providers failed; reused previous published calendar: {previous_url}")
+    return previous_calendar
+
+
+def previous_published_calendar_url(output_path: Path) -> str | None:
+    repository = os.environ.get("GITHUB_REPOSITORY")
+    if not repository or "/" not in repository:
+        return None
+    owner, repo = repository.split("/", 1)
+    return f"https://{owner}.github.io/{repo}/{output_path.name}"
 
 
 def load_watchlist(path: Path) -> list[WatchSymbol]:
@@ -1340,6 +1393,7 @@ def load_auto_financial_events(
     end_date: dt.date,
     timezone: str,
     reminder_days: int,
+    warnings: list[str] | None = None,
 ) -> list[CalendarEvent]:
     financial_config = config.get("financial_events", {})
     if not financial_config.get("enabled", False):
@@ -1348,14 +1402,20 @@ def load_auto_financial_events(
     events: list[CalendarEvent] = []
     economic_config = financial_config.get("economic_calendar", {})
     if economic_config.get("enabled", False):
-        rows = load_fmp_economic_rows(start_date=start_date, end_date=end_date)
-        countries = tuple(str(item).upper() for item in economic_config.get("countries", ["US"]))
-        events.extend(build_economic_events(rows, timezone, reminder_days, countries=countries))
+        try:
+            rows = load_fmp_economic_rows(start_date=start_date, end_date=end_date)
+            countries = tuple(str(item).upper() for item in economic_config.get("countries", ["US"]))
+            events.extend(build_economic_events(rows, timezone, reminder_days, countries=countries))
+        except Exception as exc:
+            warn_runtime(warnings, f"Economic calendar provider failed; continuing without macro events: {exc}")
 
     holidays_config = financial_config.get("market_holidays", {})
     if holidays_config.get("enabled", False):
-        exchanges = [str(item).upper() for item in holidays_config.get("exchanges", ["NASDAQ"])]
-        events.extend(load_market_holiday_events(exchanges, start_date, end_date, timezone, reminder_days))
+        try:
+            exchanges = [str(item).upper() for item in holidays_config.get("exchanges", ["NASDAQ"])]
+            events.extend(load_market_holiday_events(exchanges, start_date, end_date, timezone, reminder_days))
+        except Exception as exc:
+            warn_runtime(warnings, f"Market holiday provider failed; continuing without exchange holidays: {exc}")
 
     witching_config = financial_config.get("witching_days", {})
     if witching_config.get("enabled", False):

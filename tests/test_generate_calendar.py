@@ -2,6 +2,7 @@ import datetime as dt
 import unittest
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.generate_calendar import (
     WatchSymbol,
@@ -10,10 +11,12 @@ from scripts.generate_calendar import (
     build_economic_events,
     extract_candidate_earnings_dates,
     format_revenue_estimate,
+    load_auto_financial_events,
     load_earnings_rows,
     merge_missing_official_ir_rows,
     parse_official_earnings_text,
     render_ics,
+    reuse_previous_calendar_if_empty,
 )
 
 
@@ -232,6 +235,50 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertIn("预计方向: 预计降低", events[0].description)
         self.assertIn("如果高于预期:", events[0].description)
         self.assertIn("重点影响股票:", events[0].description)
+
+    def test_auto_financial_events_tolerate_provider_failures(self):
+        warnings: list[str] = []
+        config = {
+            "financial_events": {
+                "enabled": True,
+                "economic_calendar": {"enabled": True},
+                "market_holidays": {"enabled": True, "exchanges": ["NASDAQ"]},
+                "witching_days": {"enabled": False},
+            }
+        }
+
+        with patch("scripts.generate_calendar.load_fmp_economic_rows", side_effect=RuntimeError("HTTP Error 402: Payment Required")):
+            with patch("scripts.generate_calendar.load_market_holiday_events", side_effect=RuntimeError("HTTP Error 402: Payment Required")):
+                events = load_auto_financial_events(
+                    config=config,
+                    start_date=dt.date(2026, 5, 1),
+                    end_date=dt.date(2026, 5, 31),
+                    timezone="America/New_York",
+                    reminder_days=1,
+                    warnings=warnings,
+                )
+
+        self.assertEqual([], events)
+        self.assertEqual(2, len(warnings))
+        self.assertIn("Economic calendar provider failed", warnings[0])
+        self.assertIn("Market holiday provider failed", warnings[1])
+
+    def test_empty_degraded_run_reuses_previous_calendar(self):
+        warnings = ["Earnings provider failed"]
+        previous_calendar = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n"
+
+        with patch.dict("os.environ", {"GITHUB_REPOSITORY": "azir12345/stocks-calendar"}):
+            with patch("scripts.generate_calendar.fetch_text_url", return_value=previous_calendar) as fetch:
+                calendar = reuse_previous_calendar_if_empty(
+                    rendered_calendar="BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n",
+                    events=[],
+                    warnings=warnings,
+                    output_path=ROOT / "public/earnings.ics",
+                )
+
+        self.assertEqual(previous_calendar, calendar)
+        fetch.assert_called_once_with("https://azir12345.github.io/stocks-calendar/earnings.ics")
+        self.assertIn("reused previous published calendar", warnings[-1])
 
     def test_revenue_estimates_use_readable_units(self):
         self.assertEqual("$78.42 B", format_revenue_estimate(78423370000))
