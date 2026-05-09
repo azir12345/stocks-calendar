@@ -2,7 +2,7 @@
 
 Generate a rolling 30-day iCalendar feed for watchlist earnings and key US market events.
 
-The feed is built for iOS Calendar subscriptions through GitHub Pages. Update `watchlist.yaml`, set an FMP API key in GitHub Secrets, and GitHub Actions publishes `public/earnings.ics` once per day.
+The feed is built for iOS Calendar subscriptions through GitHub Pages. Update `watchlist.yaml`, optionally set an FMP API key in GitHub Secrets, and GitHub Actions publishes `public/earnings.ics` once per day.
 
 ## Calendar URL
 
@@ -30,16 +30,17 @@ On iPhone:
 
 ## Data Source
 
-This project uses Financial Modeling Prep's earnings and economic calendar endpoints, Nasdaq earnings calendar enrichment for before-market and after-hours timing, and company IR press releases/pages when configured:
+This project uses free data sources by default. Financial Modeling Prep is only used for earnings when an API key is available; macro events and US market holidays do not require a paid provider.
 
 ```text
 https://financialmodelingprep.com/stable/earnings-calendar
-https://financialmodelingprep.com/stable/economic-calendar
 https://api.nasdaq.com/api/calendar/earnings
+https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+Calculated NYSE/Nasdaq holiday rules with official exchange links
 Company IR press release RSS feeds and IR pages from `watchlist.yaml`
 ```
 
-Create an API key at Financial Modeling Prep, then add it to the GitHub repository:
+To improve earnings coverage, create a free API key at Financial Modeling Prep, then add it to the GitHub repository:
 
 ```text
 Settings -> Secrets and variables -> Actions -> New repository secret
@@ -49,7 +50,7 @@ Value: <your-api-key>
 
 Local `.env` files are ignored. Use `.env.example` as a reference only.
 
-If FMP returns an authorization, payment, quota, or transient provider error, the workflow continues. It records the error in `public/status.json`, keeps any official IR/manual events it can still generate, and reuses the previously published `earnings.ics` when the degraded run would otherwise publish an empty calendar.
+If FMP returns an authorization, payment, quota, or transient provider error, the workflow continues. It records the error in `public/status.json`, keeps any official IR/manual/free scheduled events it can still generate, and reuses the previously published `earnings.ics` when the degraded run would otherwise publish an empty calendar.
 
 ## Watchlist
 
@@ -130,23 +131,13 @@ The calendar includes:
 - FOMC rate decisions
 - FOMC meeting minutes
 - CPI
-- PPI
 - Nonfarm payrolls and related labor data
-- GDP
 - PCE/Core PCE
-- Retail sales
-- ISM manufacturing PMI
-- ISM services PMI
-- Initial jobless claims
-- Federal Reserve speeches when the economic calendar source includes them
-- Treasury auctions when the economic calendar source includes them
-- EIA crude oil inventory
-- OPEC/OPEC+ events when the economic calendar source or manual events include them
 - US market holidays
 - US quarterly witching days
 - Manual company/technology events
 
-Only high-impact macro events are included by default. Events marked `中` or `中到高` are filtered out to keep the subscribed calendar readable. US exchange holidays are still included as all-day events.
+Only high-impact macro events are included by default. Free scheduled macro events include official links and rule-based impact notes; when consensus/actual values are not available, the event description says so explicitly. US exchange holidays are included as all-day events and are calculated locally so they do not depend on an API quota.
 
 Each event description includes affected assets, expected direction when previous/estimate values are available, high-vs-low surprise logic, and watchlist tickers most likely to react.
 

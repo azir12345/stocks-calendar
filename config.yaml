@@ -23,11 +23,12 @@ financial_events:
   enabled: true
   economic_calendar:
     enabled: true
-    provider: fmp
+    provider: official
     countries:
       - US
   market_holidays:
     enabled: true
+    provider: calculated
     exchanges:
       - NASDAQ
       - NYSE

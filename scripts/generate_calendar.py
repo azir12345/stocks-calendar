@@ -27,6 +27,7 @@ FMP_EARNINGS_URL = "https://financialmodelingprep.com/stable/earnings-calendar"
 NASDAQ_EARNINGS_URL = "https://api.nasdaq.com/api/calendar/earnings"
 FMP_ECONOMIC_CALENDAR_URL = "https://financialmodelingprep.com/stable/economic-calendar"
 FMP_MARKET_HOLIDAYS_URL = "https://financialmodelingprep.com/stable/holidays-by-exchange"
+FED_FOMC_CALENDAR_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
 DEFAULT_TIMEZONE = "America/New_York"
 
 WATCHLIST_TEXT = "INTC, NVDA, AMD, SNDK, STX, WDC, HSBC, AAPL, MSFT, TSLA, GOOG, IBKR, META, TSM, AVGO, QCOM, ARM, DELL, MU, GM, GE, IBM, AMZN"
@@ -410,8 +411,8 @@ def build_status(
         "data_sources": {
             "earnings": "Financial Modeling Prep earnings-calendar",
             "earnings_session_enrichment": "Nasdaq earnings calendar" if nasdaq_enrichment_enabled else None,
-            "macro": "Financial Modeling Prep economic-calendar",
-            "holidays": "Financial Modeling Prep holidays-by-exchange",
+            "macro": "Federal Reserve official calendar + free scheduled release rules",
+            "holidays": "Calculated US exchange holiday rules with NYSE/Nasdaq official links",
         },
     }
 
@@ -1402,20 +1403,40 @@ def load_auto_financial_events(
     events: list[CalendarEvent] = []
     economic_config = financial_config.get("economic_calendar", {})
     if economic_config.get("enabled", False):
-        try:
-            rows = load_fmp_economic_rows(start_date=start_date, end_date=end_date)
-            countries = tuple(str(item).upper() for item in economic_config.get("countries", ["US"]))
-            events.extend(build_economic_events(rows, timezone, reminder_days, countries=countries))
-        except Exception as exc:
-            warn_runtime(warnings, f"Economic calendar provider failed; continuing without macro events: {exc}")
+        provider = str(economic_config.get("provider", "official")).lower()
+        if provider == "fmp":
+            try:
+                rows = load_fmp_economic_rows(start_date=start_date, end_date=end_date)
+                countries = tuple(str(item).upper() for item in economic_config.get("countries", ["US"]))
+                events.extend(build_economic_events(rows, timezone, reminder_days, countries=countries))
+            except Exception as exc:
+                warn_runtime(warnings, f"Economic calendar provider failed; continuing without FMP macro events: {exc}")
+        elif provider in ("official", "free"):
+            events.extend(
+                load_free_economic_events(
+                    start_date=start_date,
+                    end_date=end_date,
+                    timezone=timezone,
+                    reminder_days=reminder_days,
+                    warnings=warnings,
+                )
+            )
+        else:
+            warn_runtime(warnings, f"Unsupported economic calendar provider '{provider}'; skipping macro events")
 
     holidays_config = financial_config.get("market_holidays", {})
     if holidays_config.get("enabled", False):
-        try:
-            exchanges = [str(item).upper() for item in holidays_config.get("exchanges", ["NASDAQ"])]
-            events.extend(load_market_holiday_events(exchanges, start_date, end_date, timezone, reminder_days))
-        except Exception as exc:
-            warn_runtime(warnings, f"Market holiday provider failed; continuing without exchange holidays: {exc}")
+        exchanges = [str(item).upper() for item in holidays_config.get("exchanges", ["NASDAQ"])]
+        provider = str(holidays_config.get("provider", "calculated")).lower()
+        if provider == "fmp":
+            try:
+                events.extend(load_fmp_market_holiday_events(exchanges, start_date, end_date, timezone, reminder_days))
+            except Exception as exc:
+                warn_runtime(warnings, f"Market holiday provider failed; continuing without FMP exchange holidays: {exc}")
+        elif provider in ("calculated", "official", "free"):
+            events.extend(build_us_market_holiday_events(exchanges, start_date, end_date, timezone, reminder_days))
+        else:
+            warn_runtime(warnings, f"Unsupported market holiday provider '{provider}'; skipping exchange holidays")
 
     witching_config = financial_config.get("witching_days", {})
     if witching_config.get("enabled", False):
@@ -1440,6 +1461,243 @@ def load_fmp_economic_rows(*, start_date: dt.date, end_date: dt.date) -> list[di
     if not isinstance(data, list):
         raise ValueError(f"Unexpected FMP economic calendar response: {data!r}")
     return [row for row in data if isinstance(row, dict)]
+
+
+def load_free_economic_events(
+    *,
+    start_date: dt.date,
+    end_date: dt.date,
+    timezone: str,
+    reminder_days: int,
+    warnings: list[str] | None = None,
+) -> list[CalendarEvent]:
+    events: list[CalendarEvent] = []
+    try:
+        events.extend(load_fed_fomc_events(start_date, end_date, timezone, reminder_days))
+    except Exception as exc:
+        warn_runtime(warnings, f"Federal Reserve FOMC calendar failed; using built-in FOMC fallback: {exc}")
+        events.extend(build_known_fomc_events(start_date, end_date, timezone, reminder_days))
+
+    events.extend(build_scheduled_us_macro_events(start_date, end_date, timezone, reminder_days))
+    return dedupe_events(events)
+
+
+def load_fed_fomc_events(
+    start_date: dt.date,
+    end_date: dt.date,
+    timezone: str,
+    reminder_days: int,
+) -> list[CalendarEvent]:
+    page = fetch_text_url(FED_FOMC_CALENDAR_URL)
+    meeting_dates = parse_fomc_meeting_dates(page, start_date.year, end_date.year)
+    events: list[CalendarEvent] = []
+    for meeting_date in meeting_dates:
+        if start_date <= meeting_date <= end_date:
+            events.append(build_free_macro_event("fomc_rate", meeting_date, dt.time(14, 0), timezone, reminder_days))
+        minutes_date = meeting_date + dt.timedelta(days=21)
+        if start_date <= minutes_date <= end_date:
+            events.append(
+                build_free_macro_event("fomc_minutes", minutes_date, dt.time(14, 0), timezone, reminder_days)
+            )
+    return events
+
+
+def parse_fomc_meeting_dates(page: str, start_year: int, end_year: int) -> list[dt.date]:
+    dates: list[dt.date] = []
+    month_numbers = {
+        "january": 1,
+        "february": 2,
+        "march": 3,
+        "april": 4,
+        "may": 5,
+        "june": 6,
+        "july": 7,
+        "august": 8,
+        "september": 9,
+        "october": 10,
+        "november": 11,
+        "december": 12,
+    }
+    for year in range(start_year, end_year + 1):
+        section_match = re.search(
+            rf'>{year} FOMC Meetings</a>.*?(?=<div class="panel panel-default"><div class="panel-heading"><h4><a id="|\Z)',
+            page,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not section_match:
+            continue
+        section = section_match.group(0)
+        for match in re.finditer(
+            r'fomc-meeting__month[^>]*>\s*<strong>([^<]+)</strong>.*?fomc-meeting__date[^>]*>([^<]+)</div>',
+            section,
+            flags=re.IGNORECASE | re.DOTALL,
+        ):
+            month = month_numbers.get(html.unescape(match.group(1)).strip().lower())
+            day = fomc_decision_day(match.group(2))
+            if month is None or day is None:
+                continue
+            try:
+                dates.append(dt.date(year, month, day))
+            except ValueError:
+                continue
+    return sorted(set(dates))
+
+
+def fomc_decision_day(value: str) -> int | None:
+    text = html.unescape(value).replace("*", "").strip()
+    numbers = [int(item) for item in re.findall(r"\d+", text)]
+    if not numbers:
+        return None
+    return numbers[-1]
+
+
+def build_known_fomc_events(
+    start_date: dt.date,
+    end_date: dt.date,
+    timezone: str,
+    reminder_days: int,
+) -> list[CalendarEvent]:
+    known_meetings = {
+        2026: (
+            dt.date(2026, 1, 28),
+            dt.date(2026, 3, 18),
+            dt.date(2026, 4, 29),
+            dt.date(2026, 6, 17),
+            dt.date(2026, 7, 29),
+            dt.date(2026, 9, 16),
+            dt.date(2026, 10, 28),
+            dt.date(2026, 12, 9),
+        )
+    }
+    events: list[CalendarEvent] = []
+    for year in range(start_date.year, end_date.year + 1):
+        for meeting_date in known_meetings.get(year, ()):
+            if start_date <= meeting_date <= end_date:
+                events.append(build_free_macro_event("fomc_rate", meeting_date, dt.time(14, 0), timezone, reminder_days))
+            minutes_date = meeting_date + dt.timedelta(days=21)
+            if start_date <= minutes_date <= end_date:
+                events.append(
+                    build_free_macro_event("fomc_minutes", minutes_date, dt.time(14, 0), timezone, reminder_days)
+                )
+    return events
+
+
+def build_scheduled_us_macro_events(
+    start_date: dt.date,
+    end_date: dt.date,
+    timezone: str,
+    reminder_days: int,
+) -> list[CalendarEvent]:
+    events: list[CalendarEvent] = []
+    for month_start in iter_months(start_date, end_date):
+        scheduled = (
+            ("cpi", estimated_cpi_release_date(month_start.year, month_start.month)),
+            ("nfp", first_weekday(month_start.year, month_start.month, 4)),
+            ("pce", last_weekday(month_start.year, month_start.month, 4)),
+        )
+        for category, event_date in scheduled:
+            if start_date <= event_date <= end_date:
+                events.append(
+                    build_free_macro_event(category, event_date, dt.time(8, 30), timezone, reminder_days, estimated=True)
+                )
+    return events
+
+
+def iter_months(start_date: dt.date, end_date: dt.date) -> list[dt.date]:
+    months: list[dt.date] = []
+    current = dt.date(start_date.year, start_date.month, 1)
+    final = dt.date(end_date.year, end_date.month, 1)
+    while current <= final:
+        months.append(current)
+        if current.month == 12:
+            current = dt.date(current.year + 1, 1, 1)
+        else:
+            current = dt.date(current.year, current.month + 1, 1)
+    return months
+
+
+def estimated_cpi_release_date(year: int, month: int) -> dt.date:
+    day = dt.date(year, month, 12)
+    while day.weekday() >= 5:
+        day += dt.timedelta(days=1)
+    return day
+
+
+def first_weekday(year: int, month: int, weekday: int) -> dt.date:
+    day = dt.date(year, month, 1)
+    return day + dt.timedelta(days=(weekday - day.weekday()) % 7)
+
+
+def last_weekday(year: int, month: int, weekday: int) -> dt.date:
+    if month == 12:
+        day = dt.date(year + 1, 1, 1) - dt.timedelta(days=1)
+    else:
+        day = dt.date(year, month + 1, 1) - dt.timedelta(days=1)
+    return day - dt.timedelta(days=(day.weekday() - weekday) % 7)
+
+
+def build_free_macro_event(
+    category: str,
+    event_date: dt.date,
+    event_time: dt.time,
+    timezone: str,
+    reminder_days: int,
+    estimated: bool = False,
+) -> CalendarEvent:
+    rule = rule_by_category(category)
+    if rule is None:
+        raise ValueError(f"Unsupported macro category: {category}")
+    start = dt.datetime.combine(event_date, event_time, tzinfo=ZoneInfo(timezone))
+    end = start + dt.timedelta(minutes=30)
+    description = build_free_macro_description(rule, event_date, estimated=estimated)
+    title = f"{rule['title']} - {rule['importance']}影响"
+    if estimated:
+        title = f"{rule['title']}（预计发布日） - {rule['importance']}影响"
+    return CalendarEvent(
+        uid=make_uid("economic", category, event_date.isoformat(), "free"),
+        title=title,
+        start=start,
+        end=end,
+        all_day=False,
+        timezone=timezone,
+        description=description,
+        url=official_url_for_category(category),
+        reminder_days_before=reminder_days,
+    )
+
+
+def build_free_macro_description(rule: dict[str, Any], event_date: dt.date, estimated: bool = False) -> str:
+    category = str(rule["category"])
+    source_note = "Federal Reserve official FOMC calendar" if category.startswith("fomc") else "Free scheduled release rule with official source URL"
+    lines = [
+        f"分类: {rule['title']}",
+        "国家/地区: US",
+        f"日期: {event_date.isoformat()}",
+        f"重要性: {rule['importance']}",
+        "",
+        "影响对象:",
+        str(rule["impact_objects"]),
+        "",
+        "本次关注:",
+        "上次: 暂无数据",
+        "市场预期: 暂无数据",
+        "实际: 暂无数据",
+        "预计方向: 暂无一致预期或缺少可比上次值",
+        "",
+        "影响逻辑:",
+        f"如果高于预期: {rule['higher']}",
+        f"如果低于预期: {rule['lower']}",
+        "",
+        "重点影响股票:",
+        str(rule["focus"]),
+        "",
+        "说明:",
+        "该影响说明是规则化解读，不是投资建议；实际行情还要看核心分项、修正值、利率和市场仓位。",
+        "发布时间说明: 该事件由免费规则化日程生成，需以官方页面最终公告为准。" if estimated else "发布时间说明: 该事件来自官方日程或官方日程规则。",
+        f"官方页面: {official_url_for_category(category)}",
+        f"数据来源: {source_note}",
+    ]
+    return "\n".join(lines)
 
 
 def load_json_url(url: str) -> Any:
@@ -1731,7 +1989,7 @@ def format_value(value: Any) -> str:
     return str(value)
 
 
-def load_market_holiday_events(
+def load_fmp_market_holiday_events(
     exchanges: list[str],
     start_date: dt.date,
     end_date: dt.date,
@@ -1791,6 +2049,110 @@ def load_market_holiday_events(
                 )
             )
     return events
+
+
+def build_us_market_holiday_events(
+    exchanges: list[str],
+    start_date: dt.date,
+    end_date: dt.date,
+    timezone: str,
+    reminder_days: int,
+) -> list[CalendarEvent]:
+    normalized_exchanges = sorted({exchange.upper() for exchange in exchanges if exchange})
+    if not normalized_exchanges:
+        normalized_exchanges = ["NASDAQ", "NYSE"]
+    official_urls = [EXCHANGE_HOLIDAY_URLS[exchange] for exchange in normalized_exchanges if exchange in EXCHANGE_HOLIDAY_URLS]
+    official_url = official_urls[0] if official_urls else "https://www.nyse.com/markets/hours-calendars"
+    events: list[CalendarEvent] = []
+    for year in range(start_date.year, end_date.year + 1):
+        for event_date, name in us_market_holidays(year):
+            if event_date < start_date or event_date > end_date:
+                continue
+            exchanges_text = ", ".join(normalized_exchanges)
+            description = "\n".join(
+                [
+                    "事件: 美股休市",
+                    f"交易所: {exchanges_text}",
+                    f"名称: {name}",
+                    "重要性: 高",
+                    "",
+                    "影响对象:",
+                    "所有美股交易、财报后交易计划、期权到期、订单执行、流动性",
+                    "",
+                    "影响逻辑:",
+                    "休市期间普通股票交易暂停；如果前后有 CPI、FOMC、财报或期权到期，节前/节后波动可能放大。",
+                    "",
+                    "相关关注股:",
+                    WATCHLIST_TEXT,
+                    "",
+                    f"官方页面: {official_url}",
+                    "数据来源: Calculated NYSE/Nasdaq holiday rules",
+                ]
+            )
+            events.append(
+                CalendarEvent(
+                    uid=make_uid("holiday", "us-market", str(name), event_date.isoformat()),
+                    title=f"美股休市 - {name}",
+                    start=event_date,
+                    end=event_date + dt.timedelta(days=1),
+                    all_day=True,
+                    timezone=timezone,
+                    description=description,
+                    url=official_url,
+                    reminder_days_before=reminder_days,
+                )
+            )
+    return events
+
+
+def us_market_holidays(year: int) -> list[tuple[dt.date, str]]:
+    return sorted(
+        [
+            (observed_fixed_holiday(year, 1, 1), "New Year's Day"),
+            (nth_weekday(year, 1, 0, 3), "Martin Luther King Jr. Day"),
+            (nth_weekday(year, 2, 0, 3), "Washington's Birthday"),
+            (easter_sunday(year) - dt.timedelta(days=2), "Good Friday"),
+            (last_weekday(year, 5, 0), "Memorial Day"),
+            (observed_fixed_holiday(year, 6, 19), "Juneteenth National Independence Day"),
+            (observed_fixed_holiday(year, 7, 4), "Independence Day"),
+            (nth_weekday(year, 9, 0, 1), "Labor Day"),
+            (nth_weekday(year, 11, 3, 4), "Thanksgiving Day"),
+            (observed_fixed_holiday(year, 12, 25), "Christmas Day"),
+        ],
+        key=lambda item: item[0],
+    )
+
+
+def observed_fixed_holiday(year: int, month: int, day: int) -> dt.date:
+    holiday = dt.date(year, month, day)
+    if holiday.weekday() == 5:
+        return holiday - dt.timedelta(days=1)
+    if holiday.weekday() == 6:
+        return holiday + dt.timedelta(days=1)
+    return holiday
+
+
+def nth_weekday(year: int, month: int, weekday: int, n: int) -> dt.date:
+    day = first_weekday(year, month, weekday)
+    return day + dt.timedelta(days=7 * (n - 1))
+
+
+def easter_sunday(year: int) -> dt.date:
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return dt.date(year, month, day)
 
 
 def build_witching_events(

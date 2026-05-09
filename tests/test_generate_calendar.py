@@ -9,6 +9,7 @@ from scripts.generate_calendar import (
     apply_nasdaq_enrichment,
     build_earnings_events,
     build_economic_events,
+    build_us_market_holiday_events,
     extract_candidate_earnings_dates,
     format_revenue_estimate,
     load_auto_financial_events,
@@ -241,14 +242,14 @@ class GenerateCalendarTests(unittest.TestCase):
         config = {
             "financial_events": {
                 "enabled": True,
-                "economic_calendar": {"enabled": True},
-                "market_holidays": {"enabled": True, "exchanges": ["NASDAQ"]},
+                "economic_calendar": {"enabled": True, "provider": "fmp"},
+                "market_holidays": {"enabled": True, "provider": "fmp", "exchanges": ["NASDAQ"]},
                 "witching_days": {"enabled": False},
             }
         }
 
         with patch("scripts.generate_calendar.load_fmp_economic_rows", side_effect=RuntimeError("HTTP Error 402: Payment Required")):
-            with patch("scripts.generate_calendar.load_market_holiday_events", side_effect=RuntimeError("HTTP Error 402: Payment Required")):
+            with patch("scripts.generate_calendar.load_fmp_market_holiday_events", side_effect=RuntimeError("HTTP Error 402: Payment Required")):
                 events = load_auto_financial_events(
                     config=config,
                     start_date=dt.date(2026, 5, 1),
@@ -262,6 +263,47 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertEqual(2, len(warnings))
         self.assertIn("Economic calendar provider failed", warnings[0])
         self.assertIn("Market holiday provider failed", warnings[1])
+
+    def test_auto_financial_events_use_free_sources_without_fmp_key(self):
+        warnings: list[str] = []
+        config = {
+            "financial_events": {
+                "enabled": True,
+                "economic_calendar": {"enabled": True, "provider": "official"},
+                "market_holidays": {"enabled": True, "provider": "calculated", "exchanges": ["NASDAQ", "NYSE"]},
+                "witching_days": {"enabled": False},
+            }
+        }
+
+        with patch("scripts.generate_calendar.fetch_text_url", side_effect=RuntimeError("network blocked")):
+            events = load_auto_financial_events(
+                config=config,
+                start_date=dt.date(2026, 5, 10),
+                end_date=dt.date(2026, 6, 8),
+                timezone="America/New_York",
+                reminder_days=1,
+                warnings=warnings,
+            )
+
+        titles = [event.title for event in events]
+        self.assertIn("美国非农就业 NFP（预计发布日） - 高影响", titles)
+        self.assertIn("美国 PCE/Core PCE（预计发布日） - 高影响", titles)
+        self.assertIn("美股休市 - Memorial Day", titles)
+        self.assertTrue(any("Federal Reserve FOMC calendar failed" in warning for warning in warnings))
+
+    def test_calculated_market_holidays_are_deduped_across_exchanges(self):
+        events = build_us_market_holiday_events(
+            ["NASDAQ", "NYSE"],
+            dt.date(2026, 5, 1),
+            dt.date(2026, 5, 31),
+            "America/New_York",
+            1,
+        )
+
+        self.assertEqual(1, len(events))
+        self.assertEqual("美股休市 - Memorial Day", events[0].title)
+        self.assertIn("交易所: NASDAQ, NYSE", events[0].description)
+        self.assertEqual(dt.date(2026, 5, 25), events[0].start)
 
     def test_empty_degraded_run_reuses_previous_calendar(self):
         warnings = ["Earnings provider failed"]
