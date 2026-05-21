@@ -206,6 +206,7 @@ CATEGORY_OFFICIAL_URLS = {
 EXCHANGE_HOLIDAY_URLS = {
     "NASDAQ": "https://www.nasdaq.com/market-activity/stock-market-holiday-schedule",
     "NYSE": "https://www.nyse.com/markets/hours-calendars",
+    "KRX": "https://global.krx.co.kr/contents/GLB/06/0602/0602010000/GLB0602010000.jsp",
 }
 
 WITCHING_OFFICIAL_URL = "https://www.theocc.com/webapps/weekly-options"
@@ -412,7 +413,7 @@ def build_status(
             "earnings": "Financial Modeling Prep earnings-calendar",
             "earnings_session_enrichment": "Nasdaq earnings calendar" if nasdaq_enrichment_enabled else None,
             "macro": "Federal Reserve official calendar + free scheduled release rules",
-            "holidays": "Calculated US exchange holiday rules with NYSE/Nasdaq official links",
+            "holidays": "Calculated US/KRX exchange holiday rules with official links",
         },
     }
 
@@ -1434,7 +1435,7 @@ def load_auto_financial_events(
             except Exception as exc:
                 warn_runtime(warnings, f"Market holiday provider failed; continuing without FMP exchange holidays: {exc}")
         elif provider in ("calculated", "official", "free"):
-            events.extend(build_us_market_holiday_events(exchanges, start_date, end_date, timezone, reminder_days))
+            events.extend(build_calculated_market_holiday_events(exchanges, start_date, end_date, timezone, reminder_days))
         else:
             warn_runtime(warnings, f"Unsupported market holiday provider '{provider}'; skipping exchange holidays")
 
@@ -2051,6 +2052,25 @@ def load_fmp_market_holiday_events(
     return events
 
 
+def build_calculated_market_holiday_events(
+    exchanges: list[str],
+    start_date: dt.date,
+    end_date: dt.date,
+    timezone: str,
+    reminder_days: int,
+) -> list[CalendarEvent]:
+    normalized_exchanges = sorted({exchange.upper() for exchange in exchanges if exchange})
+    if not normalized_exchanges:
+        normalized_exchanges = ["NASDAQ", "NYSE"]
+    events: list[CalendarEvent] = []
+    us_exchanges = [exchange for exchange in normalized_exchanges if exchange in {"NASDAQ", "NYSE"}]
+    if us_exchanges:
+        events.extend(build_us_market_holiday_events(us_exchanges, start_date, end_date, timezone, reminder_days))
+    if "KRX" in normalized_exchanges:
+        events.extend(build_krx_market_holiday_events(start_date, end_date, reminder_days))
+    return events
+
+
 def build_us_market_holiday_events(
     exchanges: list[str],
     start_date: dt.date,
@@ -2121,6 +2141,129 @@ def us_market_holidays(year: int) -> list[tuple[dt.date, str]]:
         ],
         key=lambda item: item[0],
     )
+
+
+def build_krx_market_holiday_events(
+    start_date: dt.date,
+    end_date: dt.date,
+    reminder_days: int,
+) -> list[CalendarEvent]:
+    official_url = EXCHANGE_HOLIDAY_URLS["KRX"]
+    timezone = "Asia/Seoul"
+    events: list[CalendarEvent] = []
+    for year in range(start_date.year, end_date.year + 1):
+        for event_date, name in krx_market_holidays(year):
+            if event_date < start_date or event_date > end_date:
+                continue
+            description = "\n".join(
+                [
+                    "事件: 韩国交易所休市",
+                    "交易所: KRX",
+                    f"名称: {name}",
+                    "重要性: 高",
+                    "",
+                    "影响对象:",
+                    "韩国股票、ETF、KRX:000660、KRX:005930，以及相关 ADR/半导体供应链预期",
+                    "",
+                    "影响逻辑:",
+                    "休市期间韩国现货股票交易暂停；如果前后有美股财报、半导体事件或韩国大型科技公司公告，跨市场反应可能延后到下一交易日。",
+                    "",
+                    "相关关注股:",
+                    "000660.KS, 005930.KS, NVDA, AMD, TSM, MU, STX, WDC",
+                    "",
+                    f"官方页面: {official_url}",
+                    "数据来源: Calculated KRX holiday rules with Korea public-holiday fallback",
+                ]
+            )
+            events.append(
+                CalendarEvent(
+                    uid=make_uid("holiday", "krx", str(name), event_date.isoformat()),
+                    title=f"KRX 休市 - {name}",
+                    start=event_date,
+                    end=event_date + dt.timedelta(days=1),
+                    all_day=True,
+                    timezone=timezone,
+                    description=description,
+                    url=official_url,
+                    reminder_days_before=reminder_days,
+                )
+            )
+    return events
+
+
+def krx_market_holidays(year: int) -> list[tuple[dt.date, str]]:
+    holidays_by_date: dict[dt.date, str] = {}
+    for event_date, name in korea_public_holidays(year):
+        if event_date.weekday() < 5:
+            holidays_by_date[event_date] = name
+    holidays_by_date[dt.date(year, 5, 1)] = "Labor Day"
+    year_end = krx_year_end_closure(year, set(holidays_by_date))
+    holidays_by_date[year_end] = "Year-end Market Closure"
+    for event_date, name in KRX_EXTRA_CLOSURES.get(year, ()):
+        if event_date.weekday() < 5:
+            holidays_by_date[event_date] = name
+    return sorted(holidays_by_date.items(), key=lambda item: item[0])
+
+
+KRX_EXTRA_CLOSURES: dict[int, tuple[tuple[dt.date, str], ...]] = {
+    2026: (
+        (dt.date(2026, 6, 3), "Local Election Day"),
+        (dt.date(2026, 7, 17), "Constitution Day"),
+    ),
+}
+
+
+def korea_public_holidays(year: int) -> list[tuple[dt.date, str]]:
+    try:
+        import holidays as holidays_lib
+    except ImportError:
+        return fallback_korea_public_holidays(year)
+
+    country_holidays = holidays_lib.country_holidays("KR", years=[year], language="en_US")
+    return [(event_date, str(name)) for event_date, name in country_holidays.items()]
+
+
+def fallback_korea_public_holidays(year: int) -> list[tuple[dt.date, str]]:
+    fallback = {
+        2026: (
+            (dt.date(2026, 1, 1), "New Year's Day"),
+            (dt.date(2026, 2, 16), "Korean New Year Holiday"),
+            (dt.date(2026, 2, 17), "Korean New Year"),
+            (dt.date(2026, 2, 18), "Korean New Year Holiday"),
+            (dt.date(2026, 3, 2), "Independence Movement Day observed"),
+            (dt.date(2026, 5, 5), "Children's Day"),
+            (dt.date(2026, 5, 25), "Buddha's Birthday observed"),
+            (dt.date(2026, 8, 17), "Liberation Day observed"),
+            (dt.date(2026, 9, 24), "Chuseok Holiday"),
+            (dt.date(2026, 9, 25), "Chuseok"),
+            (dt.date(2026, 10, 5), "National Foundation Day observed"),
+            (dt.date(2026, 10, 9), "Hangeul Day"),
+            (dt.date(2026, 12, 25), "Christmas Day"),
+        ),
+        2027: (
+            (dt.date(2027, 1, 1), "New Year's Day"),
+            (dt.date(2027, 2, 8), "Korean New Year Holiday"),
+            (dt.date(2027, 2, 9), "Korean New Year"),
+            (dt.date(2027, 2, 10), "Korean New Year Holiday"),
+            (dt.date(2027, 3, 1), "Independence Movement Day"),
+            (dt.date(2027, 5, 5), "Children's Day"),
+            (dt.date(2027, 5, 13), "Buddha's Birthday"),
+            (dt.date(2027, 8, 16), "Liberation Day observed"),
+            (dt.date(2027, 9, 14), "Chuseok Holiday"),
+            (dt.date(2027, 9, 15), "Chuseok"),
+            (dt.date(2027, 9, 16), "Chuseok Holiday"),
+            (dt.date(2027, 10, 4), "National Foundation Day observed"),
+            (dt.date(2027, 10, 11), "Hangeul Day observed"),
+        ),
+    }
+    return list(fallback.get(year, ()))
+
+
+def krx_year_end_closure(year: int, holidays_by_date: set[dt.date]) -> dt.date:
+    day = dt.date(year, 12, 31)
+    while day.weekday() >= 5 or day in holidays_by_date:
+        day -= dt.timedelta(days=1)
+    return day
 
 
 def observed_fixed_holiday(year: int, month: int, day: int) -> dt.date:

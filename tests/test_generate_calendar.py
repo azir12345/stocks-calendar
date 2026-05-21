@@ -9,6 +9,8 @@ from scripts.generate_calendar import (
     apply_nasdaq_enrichment,
     build_earnings_events,
     build_economic_events,
+    build_calculated_market_holiday_events,
+    build_krx_market_holiday_events,
     build_us_market_holiday_events,
     extract_candidate_earnings_dates,
     format_revenue_estimate,
@@ -304,6 +306,35 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertEqual("美股休市 - Memorial Day", events[0].title)
         self.assertIn("交易所: NASDAQ, NYSE", events[0].description)
         self.assertEqual(dt.date(2026, 5, 25), events[0].start)
+
+    def test_krx_market_holidays_include_2026_special_closures(self):
+        events = build_krx_market_holiday_events(
+            dt.date(2026, 5, 20),
+            dt.date(2026, 7, 20),
+            1,
+        )
+
+        dates = {event.start for event in events}
+        self.assertIn(dt.date(2026, 5, 25), dates)
+        self.assertIn(dt.date(2026, 6, 3), dates)
+        self.assertIn(dt.date(2026, 7, 17), dates)
+        self.assertTrue(all(event.timezone == "Asia/Seoul" for event in events))
+        self.assertTrue(all("交易所: KRX" in event.description for event in events))
+
+    def test_calculated_market_holidays_dispatch_us_and_krx(self):
+        events = build_calculated_market_holiday_events(
+            ["NASDAQ", "NYSE", "KRX"],
+            dt.date(2026, 5, 20),
+            dt.date(2026, 6, 5),
+            "America/New_York",
+            1,
+        )
+
+        titles = [event.title for event in events]
+        dates = {event.start for event in events}
+        self.assertIn("美股休市 - Memorial Day", titles)
+        self.assertIn(dt.date(2026, 5, 25), dates)
+        self.assertIn(dt.date(2026, 6, 3), dates)
 
     def test_empty_degraded_run_reuses_previous_calendar(self):
         warnings = ["Earnings provider failed"]

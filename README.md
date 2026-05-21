@@ -30,13 +30,13 @@ On iPhone:
 
 ## Data Source
 
-This project uses free data sources by default. Financial Modeling Prep is only used for earnings when an API key is available; macro events and US market holidays do not require a paid provider.
+This project uses free data sources by default. Financial Modeling Prep is only used for earnings when an API key is available; macro events and exchange holidays do not require a paid provider.
 
 ```text
 https://financialmodelingprep.com/stable/earnings-calendar
 https://api.nasdaq.com/api/calendar/earnings
 https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
-Calculated NYSE/Nasdaq holiday rules with official exchange links
+Calculated NYSE/Nasdaq/KRX holiday rules with official exchange links
 Company IR press release RSS feeds and IR pages from `watchlist.yaml`
 ```
 
@@ -134,10 +134,11 @@ The calendar includes:
 - Nonfarm payrolls and related labor data
 - PCE/Core PCE
 - US market holidays
+- KRX market holidays
 - US quarterly witching days
 - Manual company/technology events
 
-Only high-impact macro events are included by default. Free scheduled macro events include official links and rule-based impact notes; when consensus/actual values are not available, the event description says so explicitly. US exchange holidays are included as all-day events and are calculated locally so they do not depend on an API quota.
+Only high-impact macro events are included by default. Free scheduled macro events include official links and rule-based impact notes; when consensus/actual values are not available, the event description says so explicitly. US and KRX exchange holidays are included as all-day events and are calculated locally so they do not depend on an API quota.
 
 Each event description includes affected assets, expected direction when previous/estimate values are available, high-vs-low surprise logic, and watchlist tickers most likely to react.
 
