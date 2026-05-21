@@ -415,17 +415,18 @@ class GenerateCalendarTests(unittest.TestCase):
         merged = merge_portfolio_holdings_into_watchlist(base_watchlist, context.holdings)
         status = build_portfolio_context_status(context)
 
-        self.assertEqual(["000660.KS", "XIACY"], sorted(context.added_watch_symbols))
-        self.assertEqual(["KRX", "NASDAQ", "NYSE"], list(context.inferred_exchanges))
+        self.assertEqual(["000660.KS", "1810.HK"], sorted(context.added_watch_symbols))
+        self.assertEqual(["HKEX", "KRX", "NASDAQ", "NYSE"], list(context.inferred_exchanges))
         self.assertIn("000660.KS", [item.symbol for item in merged])
-        self.assertIn("XIACY", [item.symbol for item in merged])
+        self.assertIn("1810.HK", [item.symbol for item in merged])
         hynix = next(item for item in merged if item.symbol == "000660.KS")
-        xiacy = next(item for item in merged if item.symbol == "XIACY")
+        xiacy = next(item for item in merged if item.symbol == "1810.HK")
         self.assertEqual("KRX:000660", hynix.tradingview)
         self.assertEqual("Asia/Seoul", hynix.timezone)
-        self.assertEqual("OTC:XIACY", xiacy.tradingview)
-        self.assertEqual(["000660.KS", "XIACY"], status["added_watch_symbols"])
-        self.assertEqual(["KRX", "NASDAQ", "NYSE"], status["inferred_exchanges"])
+        self.assertEqual("HKEX:1810", xiacy.tradingview)
+        self.assertEqual(("XIACY",), xiacy.earnings_symbols)
+        self.assertEqual(["000660.KS", "1810.HK"], status["added_watch_symbols"])
+        self.assertEqual(["HKEX", "KRX", "NASDAQ", "NYSE"], status["inferred_exchanges"])
 
     def test_portfolio_inferred_exchanges_drive_holiday_generation(self):
         config = {

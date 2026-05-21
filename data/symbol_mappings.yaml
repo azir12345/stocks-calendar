@@ -1,0 +1,25 @@
+symbols:
+  - symbol: XIACY
+    canonical_symbol: 1810.HK
+    name: Xiaomi Corporation
+    tradingview: HKEX:1810
+    exchanges:
+      - OTC
+      - HKEX
+    timezone: Asia/Hong_Kong
+    earnings_symbol: 1810.HK
+    earnings_timezone: Asia/Hong_Kong
+    include_earnings: true
+    notes: Xiaomi ADR maps to Hong Kong ordinary shares for issuer events.
+  - symbol: DRAM
+    name: Roundhill Memory ETF
+    exchanges:
+      - NASDAQ
+    include_earnings: false
+    notes: ETF holding; use for market holidays and macro exposure, not corporate earnings.
+  - symbol: SNXX
+    name: Tradr 2X Long SNDK Daily ETF
+    exchanges:
+      - NASDAQ
+    include_earnings: false
+    notes: Leveraged ETF holding; use for market holidays and macro exposure, not corporate earnings.

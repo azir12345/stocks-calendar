@@ -11,6 +11,7 @@ import xml.etree.ElementTree as ET
 import json
 import os
 import re
+import subprocess
 import sys
 import urllib.parse
 import urllib.request
@@ -241,6 +242,24 @@ class PortfolioHolding:
     account_code: str | None
     platform_name: str | None
     source: str
+    canonical_symbol: str | None = None
+    include_earnings: bool = True
+    mapping_note: str | None = None
+    mapped_exchanges: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SymbolMapping:
+    symbol: str
+    canonical_symbol: str | None = None
+    name: str | None = None
+    tradingview: str | None = None
+    exchanges: tuple[str, ...] = ()
+    timezone: str | None = None
+    earnings_symbols: tuple[str, ...] = ()
+    earnings_timezone: str | None = None
+    include_earnings: bool = True
+    notes: str | None = None
 
 
 @dataclass(frozen=True)
@@ -252,6 +271,7 @@ class PortfolioContext:
     inferred_exchanges: tuple[str, ...]
     added_watch_symbols: tuple[str, ...]
     holdings_by_exchange: dict[str, tuple[str, ...]]
+    symbol_mappings: dict[str, SymbolMapping]
     warnings: tuple[str, ...] = ()
 
 
@@ -407,31 +427,60 @@ def load_portfolio_context(
 ) -> PortfolioContext:
     portfolio_config = config.get("portfolio", {})
     if not portfolio_config.get("enabled", False):
-        return PortfolioContext(False, None, None, (), (), (), {})
+        return PortfolioContext(False, None, None, (), (), (), {}, {})
 
     source = str(portfolio_config.get("source", "personalhub_dexter_export"))
-    raw_path = str(portfolio_config.get("path", ""))
-    path = resolve_local_path(raw_path, root)
+    symbol_mappings = load_symbol_mappings(root / str(portfolio_config.get("symbol_map_file", "data/symbol_mappings.yaml")))
     context_warnings: list[str] = []
-    if not path or not path.exists():
-        message = f"Portfolio source is enabled but missing: {raw_path}"
-        warn_runtime(warnings, message)
-        context_warnings.append(message)
-        return PortfolioContext(True, source, str(path) if path else raw_path, (), (), (), {}, tuple(context_warnings))
 
-    try:
-        holdings = tuple(load_portfolio_holdings_from_json(path, portfolio_config))
-    except Exception as exc:
-        message = f"Portfolio source failed; continuing without portfolio context: {exc}"
-        warn_runtime(warnings, message)
-        context_warnings.append(message)
-        return PortfolioContext(True, source, str(path), (), (), (), {}, tuple(context_warnings))
+    source_path = ""
+    holdings: tuple[PortfolioHolding, ...] = ()
+    if source == "personalhub_postgres":
+        project_root = resolve_local_path(str(portfolio_config.get("project_root", "~/PersonalHub")), root)
+        source_path = str(project_root) if project_root else ""
+        try:
+            holdings = tuple(load_portfolio_holdings_from_personalhub_postgres(project_root, portfolio_config, symbol_mappings))
+        except Exception as exc:
+            message = f"PersonalHub Postgres portfolio source failed; trying fallback export: {exc}"
+            warn_runtime(warnings, message)
+            context_warnings.append(message)
+            fallback_path = resolve_local_path(str(portfolio_config.get("fallback_path", portfolio_config.get("path", ""))), root)
+            if fallback_path and fallback_path.exists():
+                source_path = str(fallback_path)
+                holdings = tuple(load_portfolio_holdings_from_json(fallback_path, portfolio_config, symbol_mappings))
+            else:
+                message = f"Portfolio fallback source is missing: {fallback_path}"
+                warn_runtime(warnings, message)
+                context_warnings.append(message)
+    else:
+        raw_path = str(portfolio_config.get("path", portfolio_config.get("fallback_path", "")))
+        path = resolve_local_path(raw_path, root)
+        source_path = str(path) if path else raw_path
+        if not path or not path.exists():
+            message = f"Portfolio source is enabled but missing: {raw_path}"
+            warn_runtime(warnings, message)
+            context_warnings.append(message)
+        else:
+            try:
+                holdings = tuple(load_portfolio_holdings_from_json(path, portfolio_config, symbol_mappings))
+            except Exception as exc:
+                message = f"Portfolio source failed; continuing without portfolio context: {exc}"
+                warn_runtime(warnings, message)
+                context_warnings.append(message)
 
     base_symbols = {item.symbol.upper() for item in base_watch_symbols}
-    added_symbols = tuple(sorted({holding.symbol for holding in holdings if holding.symbol.upper() not in base_symbols}))
+    added_symbols = tuple(
+        sorted(
+            {
+                holding.canonical_symbol or holding.symbol
+                for holding in holdings
+                if holding.include_earnings and (holding.canonical_symbol or holding.symbol).upper() not in base_symbols
+            }
+        )
+    )
     holdings_by_exchange = group_holdings_by_exchange(holdings, base_watch_symbols)
     inferred_exchanges = tuple(sorted(holdings_by_exchange))
-    return PortfolioContext(True, source, str(path), holdings, inferred_exchanges, added_symbols, holdings_by_exchange, tuple(context_warnings))
+    return PortfolioContext(True, source, source_path, holdings, inferred_exchanges, added_symbols, holdings_by_exchange, symbol_mappings, tuple(context_warnings))
 
 
 def resolve_local_path(raw_path: str, root: Path) -> Path | None:
@@ -443,14 +492,163 @@ def resolve_local_path(raw_path: str, root: Path) -> Path | None:
     return root / expanded
 
 
-def load_portfolio_holdings_from_json(path: Path, portfolio_config: dict[str, Any]) -> list[PortfolioHolding]:
+def load_symbol_mappings(path: Path) -> dict[str, SymbolMapping]:
+    if not path.exists():
+        return {}
+    data = load_yaml(path)
+    rows = data.get("symbols", [])
+    if not isinstance(rows, list):
+        raise ValueError(f"Invalid symbol mapping file: {path}")
+    mappings: dict[str, SymbolMapping] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        symbol = normalize_portfolio_symbol(row.get("symbol"))
+        if not symbol:
+            continue
+        earnings_values = []
+        for key in ("earnings_symbol", "earnings_symbols"):
+            value = row.get(key)
+            if isinstance(value, list):
+                earnings_values.extend(str(item).strip().upper() for item in value if str(item).strip())
+            elif value:
+                earnings_values.append(str(value).strip().upper())
+        mappings[symbol] = SymbolMapping(
+            symbol=symbol,
+            canonical_symbol=as_optional_str(row.get("canonical_symbol")),
+            name=as_optional_str(row.get("name")),
+            tradingview=as_optional_str(row.get("tradingview")),
+            exchanges=tuple(str(item).upper() for item in row.get("exchanges", []) or []),
+            timezone=as_optional_str(row.get("timezone")),
+            earnings_symbols=tuple(earnings_values),
+            earnings_timezone=as_optional_str(row.get("earnings_timezone")),
+            include_earnings=bool(row.get("include_earnings", True)),
+            notes=as_optional_str(row.get("notes")),
+        )
+    return mappings
+
+
+def load_portfolio_holdings_from_personalhub_postgres(
+    project_root: Path | None,
+    portfolio_config: dict[str, Any],
+    symbol_mappings: dict[str, SymbolMapping],
+) -> list[PortfolioHolding]:
+    if project_root is None:
+        raise ValueError("PersonalHub project_root is required")
+    env = parse_env_file(project_root / ".env")
+    psql = find_psql_binary(project_root, env)
+    if psql is None:
+        raise RuntimeError("psql binary was not found")
+    query = """
+    SELECT COALESCE(jsonb_agg(to_jsonb(v) ORDER BY account_code, symbol), '[]'::jsonb)::text
+    FROM (
+      SELECT
+        account_code,
+        platform_name,
+        broker_name,
+        symbol,
+        name,
+        instrument_type,
+        currency_code,
+        quantity,
+        current_position_source
+      FROM hub.v_investment_current_position_estimated
+      WHERE ABS(quantity) > 0.00000001
+      ORDER BY account_code, symbol
+    ) v;
+    """
+    run_env = dict(os.environ)
+    run_env["PGPASSWORD"] = env.get("POSTGRES_PASSWORD", "")
+    run_env["PGCONNECT_TIMEOUT"] = "10"
+    command = [
+        str(psql),
+        "-w",
+        "-h",
+        env.get("POSTGRES_HOST", "127.0.0.1"),
+        "-p",
+        env.get("POSTGRES_PORT", "5432"),
+        "-U",
+        env.get("POSTGRES_USER", ""),
+        "-d",
+        env.get("POSTGRES_DB", ""),
+        "-X",
+        "-q",
+        "-t",
+        "-A",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-c",
+        query,
+    ]
+    result = subprocess.run(
+        command,
+        cwd=project_root,
+        env=run_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=20,
+        check=True,
+    )
+    rows = json.loads(result.stdout.strip() or "[]")
+    if not isinstance(rows, list):
+        raise ValueError("PersonalHub Postgres query did not return a JSON list")
+    return portfolio_holdings_from_rows(rows, portfolio_config, symbol_mappings, source="personalhub_postgres")
+
+
+def parse_env_file(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    env: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        env[key.strip()] = value.strip().strip('"').strip("'")
+    return env
+
+
+def find_psql_binary(project_root: Path, env: dict[str, str]) -> Path | None:
+    candidates: list[Path] = []
+    if env.get("PGBIN_DIR"):
+        candidates.append(resolve_local_path(env["PGBIN_DIR"], project_root) or Path(env["PGBIN_DIR"]))
+    candidates.extend(
+        [
+            project_root / "vendor/Postgres.app/Contents/Versions/16/bin",
+            project_root / "vendor/Postgres.app/Contents/Versions/latest/bin",
+            Path("/opt/homebrew/opt/postgresql@16/bin"),
+            Path("/opt/homebrew/opt/postgresql@17/bin"),
+            Path("/usr/local/opt/postgresql@16/bin"),
+        ]
+    )
+    for directory in candidates:
+        binary = directory / "psql"
+        if binary.exists():
+            return binary
+    return None
+
+
+def load_portfolio_holdings_from_json(
+    path: Path,
+    portfolio_config: dict[str, Any],
+    symbol_mappings: dict[str, SymbolMapping],
+) -> list[PortfolioHolding]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("Portfolio export must be a JSON object")
     rows = data.get("current_holdings", [])
     if not isinstance(rows, list):
         raise ValueError("Portfolio export current_holdings must be a list")
+    return portfolio_holdings_from_rows(rows, portfolio_config, symbol_mappings, source=path.name)
 
+
+def portfolio_holdings_from_rows(
+    rows: list[Any],
+    portfolio_config: dict[str, Any],
+    symbol_mappings: dict[str, SymbolMapping],
+    source: str,
+) -> list[PortfolioHolding]:
     allowed_types = {str(item).lower() for item in portfolio_config.get("instrument_types", ["equity"])}
     minimum_quantity = float(portfolio_config.get("minimum_quantity", 0))
     holdings: list[PortfolioHolding] = []
@@ -464,19 +662,37 @@ def load_portfolio_holdings_from_json(path: Path, portfolio_config: dict[str, An
             continue
         if allowed_types and str(instrument_type or "").lower() not in allowed_types:
             continue
+        mapping = symbol_mappings.get(symbol)
+        include_earnings = mapped_include_earnings(row, mapping)
         holdings.append(
             PortfolioHolding(
                 symbol=symbol,
-                name=as_optional_str(row.get("name")),
+                name=(mapping.name if mapping and mapping.name else as_optional_str(row.get("name"))),
                 instrument_type=instrument_type,
                 quantity=quantity,
                 currency_code=as_optional_str(row.get("currency_code")),
                 account_code=as_optional_str(row.get("account_code")),
                 platform_name=as_optional_str(row.get("platform_name")),
-                source=as_optional_str(row.get("current_position_source")) or path.name,
+                source=as_optional_str(row.get("current_position_source")) or source,
+                canonical_symbol=mapping.canonical_symbol if mapping else None,
+                include_earnings=include_earnings,
+                mapping_note=mapping.notes if mapping else None,
+                mapped_exchanges=mapping.exchanges if mapping else (),
             )
         )
     return holdings
+
+
+def mapped_include_earnings(row: dict[str, Any], mapping: SymbolMapping | None) -> bool:
+    if mapping is not None:
+        return mapping.include_earnings
+    name = str(row.get("name") or "").lower()
+    symbol = str(row.get("symbol") or "").upper()
+    if " etf" in name or "daily etf" in name or "leveraged" in name or "2x" in name:
+        return False
+    if symbol in {"DRAM", "SNXX"}:
+        return False
+    return True
 
 
 def normalize_portfolio_symbol(value: Any) -> str:
@@ -506,29 +722,35 @@ def merge_portfolio_holdings_into_watchlist(
     merged = list(watch_symbols)
     existing = {item.symbol.upper() for item in merged}
     for holding in holdings:
-        if holding.symbol.upper() in existing:
+        if not holding.include_earnings:
+            continue
+        symbol = holding.canonical_symbol or holding.symbol
+        if symbol.upper() in existing:
             continue
         merged.append(
             WatchSymbol(
-                symbol=holding.symbol,
+                symbol=symbol,
                 name=holding.name,
                 tradingview=infer_tradingview_from_holding(holding),
                 timezone=infer_timezone_from_holding(holding),
                 earnings_timezone=infer_timezone_from_holding(holding),
+                earnings_symbols=(holding.symbol,) if holding.canonical_symbol else (),
             )
         )
-        existing.add(holding.symbol.upper())
+        existing.add(symbol.upper())
     return merged
 
 
 def infer_tradingview_from_holding(holding: PortfolioHolding) -> str | None:
-    symbol = holding.symbol.upper()
+    symbol = (holding.canonical_symbol or holding.symbol).upper()
     if symbol.endswith(".KS"):
         return f"KRX:{symbol.removesuffix('.KS')}"
     if symbol.endswith(".KQ"):
         return f"KRX:{symbol.removesuffix('.KQ')}"
     if symbol.endswith(".HK"):
         return f"HKEX:{symbol.removesuffix('.HK')}"
+    if symbol == "1810.HK":
+        return "HKEX:1810"
     if holding.currency_code and holding.currency_code.upper() == "KRW":
         return f"KRX:{symbol}"
     if holding.currency_code and holding.currency_code.upper() == "HKD":
@@ -570,8 +792,18 @@ def infer_exchanges_for_holding(
     holding: PortfolioHolding,
     watch_by_symbol: dict[str, WatchSymbol],
 ) -> set[str]:
-    symbol = holding.symbol.upper()
-    watch_item = watch_by_symbol.get(symbol)
+    if holding.mapped_exchanges:
+        exchanges: set[str] = set()
+        for exchange in holding.mapped_exchanges:
+            normalized = exchange.upper()
+            if normalized == "OTC":
+                exchanges.update({"NASDAQ", "NYSE"})
+            elif normalized in {"NASDAQ", "NYSE", "KRX", "HKEX"}:
+                exchanges.add(normalized)
+        if exchanges:
+            return exchanges
+    symbol = (holding.canonical_symbol or holding.symbol).upper()
+    watch_item = watch_by_symbol.get(symbol) or watch_by_symbol.get(holding.symbol.upper())
     tradingview = (watch_item.tradingview if watch_item else None) or infer_tradingview_from_holding(holding) or ""
     prefix = tradingview.split(":", 1)[0].upper() if ":" in tradingview else ""
     if prefix in {"NASDAQ", "NYSE", "KRX", "HKEX"}:
@@ -643,14 +875,16 @@ def build_status(
             watch_symbols=watch_symbols,
             default_timezone=timezone,
         ),
+        "macro_audit": build_macro_audit_status(events),
         "portfolio_context": build_portfolio_context_status(portfolio_context),
+        "portfolio_event_impact": build_portfolio_event_impact_status(events, portfolio_context),
         "output_file": str(output_path),
         "warnings": warnings or [],
         "data_sources": {
             "earnings": "Financial Modeling Prep earnings-calendar",
             "earnings_session_enrichment": "Nasdaq earnings calendar" if nasdaq_enrichment_enabled else None,
             "macro": "Federal Reserve + BLS/BEA official schedules + local official snapshot fallback",
-            "holidays": "Calculated US/KRX exchange holiday rules with official links",
+            "holidays": "Calculated US/KRX/HKEX exchange holiday rules with official links",
         },
     }
 
@@ -715,6 +949,93 @@ def build_portfolio_context_status(portfolio_context: PortfolioContext | None) -
         "holdings_by_exchange": {exchange: list(symbols) for exchange, symbols in sorted(portfolio_context.holdings_by_exchange.items())},
         "warnings": list(portfolio_context.warnings),
     }
+
+
+def build_macro_audit_status(events: list[CalendarEvent]) -> list[dict[str, Any]]:
+    audit: list[dict[str, Any]] = []
+    for event in events:
+        if not event.uid.startswith("economic-"):
+            continue
+        audit.append(
+            {
+                "title": event.title,
+                "start": event_start_key(event.start),
+                "source": extract_description_field(event.description, "数据来源"),
+                "official_url": extract_description_field(event.description, "官方页面") or event.url,
+                "estimated": "预计发布日" in event.title or "规则化日程生成" in event.description,
+                "reference_period": extract_description_field(event.description, "统计期"),
+            }
+        )
+    return audit
+
+
+def extract_description_field(description: str, label: str) -> str | None:
+    prefix = f"{label}:"
+    for line in description.splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix) :].strip() or None
+    return None
+
+
+def build_portfolio_event_impact_status(
+    events: list[CalendarEvent],
+    portfolio_context: PortfolioContext | None,
+) -> dict[str, Any]:
+    if portfolio_context is None or not portfolio_context.enabled:
+        return {"enabled": False, "holdings": []}
+    holdings: list[dict[str, Any]] = []
+    for holding in portfolio_context.holdings:
+        related_events: list[dict[str, Any]] = []
+        exchanges = infer_exchanges_for_holding(holding, {})
+        symbols_to_match = {holding.symbol}
+        if holding.canonical_symbol:
+            symbols_to_match.add(holding.canonical_symbol)
+        for event in events:
+            match_reasons = event_match_reasons(event, symbols_to_match, exchanges)
+            if not match_reasons:
+                continue
+            related_events.append(
+                {
+                    "title": event.title,
+                    "start": event_start_key(event.start),
+                    "url": event.url,
+                    "match_reasons": match_reasons,
+                }
+            )
+        holdings.append(
+            {
+                "symbol": holding.symbol,
+                "canonical_symbol": holding.canonical_symbol,
+                "name": holding.name,
+                "quantity": holding.quantity,
+                "currency_code": holding.currency_code,
+                "account_code": holding.account_code,
+                "exchanges": sorted(exchanges),
+                "include_earnings": holding.include_earnings,
+                "mapping_note": holding.mapping_note,
+                "related_events": related_events,
+            }
+        )
+    return {
+        "enabled": True,
+        "holdings": holdings,
+    }
+
+
+def event_match_reasons(event: CalendarEvent, symbols: set[str], exchanges: set[str]) -> list[str]:
+    text = f"{event.title}\n{event.description}".upper()
+    reasons: list[str] = []
+    for symbol in sorted(symbols):
+        if symbol and symbol.upper() in text:
+            reasons.append(f"symbol:{symbol}")
+    if event.uid.startswith("holiday-"):
+        for exchange in sorted(exchanges):
+            if exchange in text:
+                reasons.append(f"exchange_holiday:{exchange}")
+    if event.uid.startswith("economic-") and any(exchange in {"NASDAQ", "NYSE", "KRX", "HKEX"} for exchange in exchanges):
+        if any(keyword in text for keyword in ("半导体", "科技", "美股", "成长股", "银行股", "风险偏好")):
+            reasons.append("macro_exposure")
+    return sorted(set(reasons))
 
 
 def warn_runtime(warnings: list[str] | None, message: str) -> None:

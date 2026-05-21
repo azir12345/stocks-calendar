@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.azir.stocks-calendar.local</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>cd /Users/azir/stocks-calendar &amp;&amp; /usr/bin/python3 scripts/generate_calendar.py &amp;&amp; /usr/bin/python3 scripts/sync_apple_calendar.py --apply</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>17</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/azir/stocks-calendar/logs/local-calendar.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/azir/stocks-calendar/logs/local-calendar.err.log</string>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/azir/stocks-calendar</string>
+</dict>
+</plist>

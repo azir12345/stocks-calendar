@@ -40,7 +40,7 @@ https://www.bls.gov/schedule/news_release/cpi.htm
 https://www.bls.gov/schedule/news_release/empsit.htm
 https://www.bea.gov/news/schedule
 data/official_macro_releases.yaml
-Calculated NYSE/Nasdaq/KRX holiday rules with official exchange links
+Calculated NYSE/Nasdaq/KRX/HKEX holiday rules with official exchange links
 Company IR press release RSS feeds and IR pages from `watchlist.yaml`
 ```
 
@@ -115,20 +115,29 @@ symbols:
 
 ## Portfolio Context
 
-The local branch can read a read-only PersonalHub investment export and use current holdings as calendar context:
+The local branch reads PersonalHub Postgres directly and falls back to the read-only Dexter export if the database is unavailable:
 
 ```yaml
 portfolio:
   enabled: true
-  source: personalhub_dexter_export
-  path: /Users/azir/PersonalHub/exports/dexter/investment_context.json
+  source: personalhub_postgres
+  project_root: /Users/azir/PersonalHub
+  fallback_path: /Users/azir/PersonalHub/exports/dexter/investment_context.json
+  symbol_map_file: data/symbol_mappings.yaml
   include_holdings_in_watchlist: true
   infer_market_holidays: true
   instrument_types:
     - equity
 ```
 
-When enabled, equity holdings are merged into the generated watchlist for earnings lookup, and their inferred exchanges are added to the holiday calendar. For example, `000660.KS` adds KRX holidays, while USD-listed holdings add US market holidays. The generated `status.json` includes `portfolio_context` with holding symbols, added watchlist symbols, inferred exchanges, and holdings grouped by exchange.
+When enabled, equity holdings are merged into the generated watchlist for earnings lookup, and their inferred exchanges are added to the holiday calendar. For example, `000660.KS` adds KRX holidays, while USD-listed holdings add US market holidays. Symbol mappings in `data/symbol_mappings.yaml` handle ADRs and ETF-like products; for example `XIACY` maps to Xiaomi's Hong Kong ordinary shares for issuer events, while ETF holdings such as `DRAM` and `SNXX` are used for exchange holidays and macro exposure but not corporate earnings.
+
+The generated `status.json` includes:
+
+- `portfolio_context`: holding symbols, added watchlist symbols, inferred exchanges, and holdings grouped by exchange
+- `portfolio_event_impact`: per-holding related calendar events and match reasons
+- `macro_audit`: official source, reference period, URL, and whether the date was estimated
+- `earnings_coverage`: detected earnings rows, source quality, timed rows, and missing symbols
 
 ## Timing Rules
 
@@ -225,6 +234,14 @@ python scripts/sync_apple_calendar.py --apply
 ```
 
 The sync script creates/uses a separate Apple Calendar and marks events with an internal `stocks-calendar` UID in the event notes. On each apply run it replaces only previously synced events in the generated feed window, so it does not delete unrelated personal calendar items.
+
+A disabled-by-default launchd template is available at:
+
+```text
+configs/launchd/com.azir.stocks-calendar.local.plist.example
+```
+
+It shows the intended future macOS local flow: generate the calendar, then optionally sync it into Apple Calendar. Installing or loading that plist is a manual step and is not done by this project.
 
 ## GitHub Pages
 

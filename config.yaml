@@ -21,8 +21,10 @@ links:
 
 portfolio:
   enabled: true
-  source: personalhub_dexter_export
-  path: /Users/azir/PersonalHub/exports/dexter/investment_context.json
+  source: personalhub_postgres
+  project_root: /Users/azir/PersonalHub
+  fallback_path: /Users/azir/PersonalHub/exports/dexter/investment_context.json
+  symbol_map_file: data/symbol_mappings.yaml
   include_holdings_in_watchlist: true
   infer_market_holidays: true
   minimum_quantity: 0
