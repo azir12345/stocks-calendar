@@ -18,6 +18,12 @@ Generation status is published at:
 https://<github-user>.github.io/stocks-calendar/status.json
 ```
 
+The local branch also writes a static dashboard at:
+
+```text
+public/dashboard.html
+```
+
 On iPhone:
 
 1. Open Settings.
@@ -56,7 +62,9 @@ Local `.env` files are ignored. Use `.env.example` as a reference only.
 
 If FMP returns an authorization, payment, quota, or transient provider error, the workflow continues. It records the error in `public/status.json`, keeps any official IR/manual/free scheduled events it can still generate, and reuses the previously published `earnings.ics` when the degraded run would otherwise publish an empty calendar.
 
-`public/status.json` also includes `earnings_coverage`, which lists symbols with detected earnings events, symbols without events in the current 30-day window, official-IR-confirmed rows, Nasdaq session-enriched rows, timed rows, and low-confidence rows. This is intended to make future integration with a local investment database straightforward.
+`public/status.json` also includes `earnings_coverage`, which lists symbols with detected earnings events, symbols without events in the current 30-day window, official-IR-confirmed rows, Nasdaq session-enriched rows, timed rows, low-confidence rows, source quality, and event confidence. This is intended to make future integration with a local investment database straightforward.
+
+Official IR scanning is deliberately capped. Per-symbol `preferred_ir_url_patterns` and `skip_ir_url_patterns` in `watchlist.yaml` can move likely earnings announcement pages first and suppress noisy historical result pages. The scan cache records URL failures, skipped URLs, truncation, and next refresh timing in `official_ir_cache_audit`.
 
 ## Watchlist
 
@@ -132,22 +140,30 @@ portfolio:
 
 When enabled, equity holdings are merged into the generated watchlist for earnings lookup, and their inferred exchanges are added to the holiday calendar. For example, `000660.KS` adds KRX holidays, while USD-listed holdings add US market holidays. Symbol mappings in `data/symbol_mappings.yaml` handle ADRs and ETF-like products; for example `XIACY` maps to Xiaomi's Hong Kong ordinary shares for issuer events, while ETF holdings such as `DRAM` and `SNXX` are used for exchange holidays and macro exposure but not corporate earnings.
 
-The generated `status.json` includes:
+The generated `status.json` and `public/dashboard.html` include:
 
 - `portfolio_context`: holding symbols, added watchlist symbols, inferred exchanges, and holdings grouped by exchange
-- `portfolio_event_impact`: per-holding related calendar events and match reasons
+- `portfolio_event_impact`: per-holding related calendar events, match reasons, impact scores, and market-value weighted impact scores when PersonalHub has market values
 - `macro_audit`: official source, reference period, URL, and whether the date was estimated
 - `earnings_coverage`: detected earnings rows, source quality, timed rows, and missing symbols
+- `confidence_counts` and `event_summary`: confidence levels, event categories, impact scores, and URLs
+- `url_validation`: a capped, role-aware HTTP validation pass for `primary_event_url`, `official_source_url`, `tradingview_url`, `apple_stocks_scheme`, and source URLs
+- holding themes such as semiconductor, memory, bank/rates-sensitive, auto, ADR, ETF, and local-market exposure
 
 ## Timing Rules
 
 - The calendar window is today through the next 30 days.
 - If the data source provides a precise time, the event is timed in the symbol's configured exchange timezone, or `America/New_York` when the symbol has no override.
 - If a company IR press release/page provides an official release, webcast, or conference-call time, that official timing is used ahead of FMP and Nasdaq timing.
+- Official IR pages and RSS links are scanned as a free fallback and cached in `.cache/official_ir_earnings.json`; the cache is ignored by git.
 - If FMP does not provide before/after timing, Nasdaq earnings calendar is used automatically to enrich `盘前` / `盘后`.
 - If the data source only provides before-market or after-market status, the event is timed with the symbol's exchange timezone so iOS converts it correctly for local time zones: `盘前` -> `08:00`, `盘后` -> `16:05`, `盘中` -> `12:00`.
 - If timing is unknown, the title says `时间待定`.
+- If an official conference-call or webcast time is found, the calendar creates a separate `财报电话会` event. When enabled, it also creates a `财报后观察` rule-based observation window.
+- The observation window uses the next trading day for the symbol's exchange timezone, so a Friday after-market release is not placed on Saturday.
+- `calendar.ics_filter` controls what reaches the subscribed `.ics`; dashboard and status keep the full audit trail.
 - Earnings descriptions include `时间精度` so inferred session times are not confused with official minute-level release times.
+- Event descriptions include `事件分类` and `可信度`.
 - Each event includes a one-day-before `VALARM`.
 
 Example title:
@@ -167,6 +183,8 @@ The calendar includes:
 - PCE/Core PCE
 - US market holidays
 - KRX market holidays
+- HKEX market holidays
+- TSE, TWSE, LSE, and Euronext public-holiday based market-holiday reminders when matching holdings imply those exchanges
 - US quarterly witching days
 - Manual company/technology events
 
@@ -221,6 +239,20 @@ Generate with the real provider:
 FMP_API_KEY=<your-api-key> python scripts/generate_calendar.py
 ```
 
+The first real run may spend extra time building the official IR cache. Later runs reuse the cache until `earnings.official_ir_cache.ttl_hours` expires.
+
+The generator also has stage-level caps:
+
+```yaml
+earnings:
+  official_ir_cache:
+    max_elapsed_seconds: 45
+url_validation:
+  max_elapsed_seconds: 20
+```
+
+If a stage hits its cap, the run degrades and records the truncation instead of blocking the workflow.
+
 Preview a local Apple Calendar sync on macOS:
 
 ```bash
@@ -242,6 +274,14 @@ configs/launchd/com.azir.stocks-calendar.local.plist.example
 ```
 
 It shows the intended future macOS local flow: generate the calendar, then optionally sync it into Apple Calendar. Installing or loading that plist is a manual step and is not done by this project.
+
+The helper installer writes a LaunchAgent plist but does not load it unless `--load` is passed:
+
+```bash
+python scripts/install_local_launchd.py
+```
+
+By default the installed job only regenerates the local files. To include Apple Calendar writing in that plist, pass `--sync-apple-calendar`; to actually enable launchd, pass `--load` explicitly.
 
 ## GitHub Pages
 

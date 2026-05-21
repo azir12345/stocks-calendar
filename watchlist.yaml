@@ -14,11 +14,22 @@ symbols:
     tradingview: NASDAQ:AMD
     ir_url: https://ir.amd.com/news-events/ir-calendar
     ir_press_releases_rss: https://ir.amd.com/news-events/press-releases/rss
+    preferred_ir_url_patterns:
+      - earnings-release-date
+      - report-fiscal
+    skip_ir_url_patterns:
+      - reports-first-quarter-2026-financial-results
   - symbol: SNDK
     name: SanDisk
     tradingview: NASDAQ:SNDK
     ir_url: https://investor.sandisk.com/
     ir_press_releases_rss: https://investor.sandisk.com/rss/news-releases.xml
+    preferred_ir_url_patterns:
+      - earnings
+      - report
+    skip_ir_url_patterns:
+      - fiscal-second-quarter
+      - fiscal-third-quarter-results
   - symbol: STX
     name: Seagate Technology
     tradingview: NASDAQ:STX
@@ -28,6 +39,9 @@ symbols:
     tradingview: NASDAQ:WDC
     ir_url: https://investor.wdc.com/news-releases
     ir_press_releases_rss: https://investor.wdc.com/rss/news-releases.xml
+    preferred_ir_url_patterns:
+      - earnings
+      - financial-results
   - symbol: HSBC
     name: HSBC
     tradingview: NYSE:HSBC
@@ -87,6 +101,9 @@ symbols:
     tradingview: NASDAQ:ARM
     ir_url: https://investors.arm.com/news-events/press-releases
     ir_press_releases_rss: https://investors.arm.com/rss/news-releases.xml
+    preferred_ir_url_patterns:
+      - earnings-release-date
+      - reports-results
   - symbol: DELL
     name: Dell Technologies
     tradingview: NYSE:DELL

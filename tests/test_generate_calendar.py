@@ -1,31 +1,47 @@
 import datetime as dt
 import unittest
 import json
+import tempfile
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
 from scripts.generate_calendar import (
+    CalendarEvent,
+    PortfolioHolding,
     WatchSymbol,
     apply_nasdaq_enrichment,
     build_earnings_events,
     build_economic_events,
     build_earnings_coverage_status,
+    build_generic_exchange_market_holiday_events,
     build_portfolio_context_status,
     build_calculated_market_holiday_events,
     build_krx_market_holiday_events,
     build_us_market_holiday_events,
+    holding_event_impact,
     extract_candidate_earnings_dates,
     format_revenue_estimate,
     load_auto_financial_events,
+    load_official_ir_fallback_rows,
+    load_symbol_mappings,
     load_portfolio_context,
     load_free_economic_events,
     merge_portfolio_holdings_into_watchlist,
     load_earnings_rows,
     merge_missing_official_ir_rows,
+    next_trading_day,
+    dedupe_earnings_rows,
     parse_official_earnings_text,
+    prioritized_event_sort_key,
+    portfolio_event_impact_score,
+    render_dashboard_html,
     render_ics,
     reuse_previous_calendar_if_empty,
+    validate_event_urls,
+    validate_url,
 )
+from scripts.install_local_launchd import build_launchd_plist
 from scripts.sync_apple_calendar import (
     SYNC_MARKER_PREFIX,
     build_applescript,
@@ -229,6 +245,134 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertEqual(dt.time(5, 0), events[0].start.time())
         self.assertIn("官方财报页面: https://www.hsbc.com/investors/results-and-announcements", events[0].description)
 
+    def test_official_ir_fallback_cache_reuses_scanned_rows(self):
+        html = (
+            "<html><body>AMD will report fiscal first quarter 2026 financial results "
+            "on Tuesday, May 5, 2026, after the market close. Management will conduct "
+            "a conference call at 5:00 p.m. ET.</body></html>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_path = Path(tmpdir) / "official_ir.json"
+            with patch("scripts.generate_calendar.fetch_text_url", return_value=html) as fetch:
+                first = load_official_ir_fallback_rows(
+                    watch_symbols=[
+                        WatchSymbol(
+                            symbol="AMD",
+                            name="Advanced Micro Devices",
+                            ir_url="https://ir.amd.com/news-events/ir-calendar",
+                        )
+                    ],
+                    start_date=dt.date(2026, 5, 1),
+                    end_date=dt.date(2026, 5, 31),
+                    default_timezone="America/New_York",
+                    cache_path=cache_path,
+                    cache_ttl_hours=24,
+                )
+                second = load_official_ir_fallback_rows(
+                    watch_symbols=[
+                        WatchSymbol(
+                            symbol="AMD",
+                            name="Advanced Micro Devices",
+                            ir_url="https://ir.amd.com/news-events/ir-calendar",
+                        )
+                    ],
+                    start_date=dt.date(2026, 5, 1),
+                    end_date=dt.date(2026, 5, 31),
+                    default_timezone="America/New_York",
+                    cache_path=cache_path,
+                    cache_ttl_hours=24,
+                )
+
+        self.assertEqual(1, len(first))
+        self.assertEqual(first, second)
+        fetch.assert_called_once()
+
+    def test_official_ir_url_patterns_skip_noisy_links(self):
+        html = (
+            "<rss><channel>"
+            "<item><title>AMD announces earnings release date</title><link>https://ir.amd.com/good-earnings-release-date</link></item>"
+            "<item><title>AMD reports first quarter 2026 financial results</title><link>https://ir.amd.com/reports-first-quarter-2026-financial-results</link></item>"
+            "</channel></rss>"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_path = Path(tmpdir) / "official_ir.json"
+            with patch("scripts.generate_calendar.fetch_text_url", side_effect=[html, "AMD will report financial results on May 5, 2026 after the market close at 5:00 p.m. ET."]):
+                rows = load_official_ir_fallback_rows(
+                    watch_symbols=[
+                        WatchSymbol(
+                            symbol="AMD",
+                            name="Advanced Micro Devices",
+                            ir_press_releases_rss="https://ir.amd.com/rss",
+                            preferred_ir_url_patterns=("earnings-release-date",),
+                            skip_ir_url_patterns=("reports-first-quarter",),
+                        )
+                    ],
+                    start_date=dt.date(2026, 5, 1),
+                    end_date=dt.date(2026, 5, 31),
+                    default_timezone="America/New_York",
+                    cache_path=cache_path,
+                    cache_ttl_hours=24,
+                    max_urls_per_symbol=4,
+                    timeout_seconds=1,
+                    max_elapsed_seconds=5,
+                )
+            audit = json.loads(cache_path.read_text(encoding="utf-8"))["symbols"]["AMD"]
+
+        self.assertEqual(1, len(rows))
+        self.assertEqual(["https://ir.amd.com/good-earnings-release-date"], audit["urls_scanned"])
+
+    def test_earnings_rows_dedupe_prefers_official_source(self):
+        rows = [
+            {"symbol": "AMD", "date": "2026-05-05", "time": "amc"},
+            {
+                "symbol": "AMD",
+                "date": "2026-05-05",
+                "time": "17:00",
+                "officialUrl": "https://ir.amd.com/official",
+                "confidence": "official_confirmed",
+            },
+        ]
+
+        deduped = dedupe_earnings_rows(
+            rows,
+            [WatchSymbol(symbol="AMD", name="AMD")],
+            "America/New_York",
+        )
+
+        self.assertEqual(1, len(deduped))
+        self.assertEqual("https://ir.amd.com/official", deduped[0]["officialUrl"])
+
+    def test_earnings_call_and_observation_events_are_separate(self):
+        rows = [
+            {
+                "symbol": "AMD",
+                "date": "2026-05-05",
+                "session": "after",
+                "releaseTime": "16:05",
+                "conferenceCallTime": "17:00",
+                "officialUrl": "https://ir.amd.com/news-events/ir-calendar",
+                "confidence": "official_confirmed",
+            }
+        ]
+        events = build_earnings_events(
+            rows=rows,
+            watch_symbols=[WatchSymbol(symbol="AMD", name="Advanced Micro Devices", tradingview="NASDAQ:AMD")],
+            timezone="America/New_York",
+            reminder_days=1,
+            timed_event_minutes=30,
+            links_config={},
+            include_observation_events=True,
+        )
+
+        by_title = {event.title: event for event in events}
+        self.assertEqual(dt.time(16, 5), by_title["Advanced Micro Devices (AMD) 财报 - 盘后"].start.time())
+        self.assertEqual(dt.time(17, 0), by_title["Advanced Micro Devices (AMD) 财报电话会"].start.time())
+        self.assertEqual(dt.date(2026, 5, 6), by_title["Advanced Micro Devices (AMD) 财报后观察"].start.date())
+        self.assertEqual("rule_estimated", by_title["Advanced Micro Devices (AMD) 财报后观察"].confidence)
+
+    def test_earnings_observation_uses_next_trading_day(self):
+        self.assertEqual(dt.date(2026, 5, 26), next_trading_day(dt.date(2026, 5, 23), "America/New_York"))
+
     def test_extract_candidate_earnings_dates_accepts_uk_dates(self):
         text = "1Q 2026 Earnings Release 05 May 2026. Another date is 2026-06-30."
 
@@ -342,7 +486,7 @@ class GenerateCalendarTests(unittest.TestCase):
         status = build_earnings_coverage_status(
             rows,
             watch_symbols=[
-                WatchSymbol(symbol="NVDA", name="NVIDIA"),
+                WatchSymbol(symbol="NVDA", name="NVIDIA", ir_url="https://nvidianews.nvidia.com/"),
                 WatchSymbol(symbol="AMD", name="AMD"),
                 WatchSymbol(symbol="AAPL", name="Apple"),
             ],
@@ -356,6 +500,144 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertEqual(1, status["nasdaq_session_enriched_rows"])
         self.assertEqual(1, status["timed_rows"])
         self.assertEqual([{"symbol": "AMD", "reason": "missing before/after/precise-time marker"}], status["low_confidence_rows"])
+        coverage = {item["symbol"]: item for item in status["watchlist_source_coverage"]}
+        self.assertEqual("official_ir_page_plus_event", coverage["NVDA"]["source_quality"])
+        self.assertEqual("provider_event", coverage["AMD"]["source_quality"])
+        self.assertEqual("provider_only", coverage["AAPL"]["source_quality"])
+
+    def test_symbol_mappings_include_themes_and_adr_exchange_exposure(self):
+        mappings = load_symbol_mappings(ROOT / "data/symbol_mappings.yaml")
+
+        self.assertIn("bank", mappings["HSBC"].themes)
+        self.assertIn("LSE", mappings["HSBC"].exchanges)
+        self.assertIn("semiconductor", mappings["TSM"].themes)
+        self.assertIn("TWSE", mappings["TSM"].exchanges)
+        self.assertFalse(mappings["DRAM"].include_earnings)
+
+    def test_portfolio_impact_rules_score_direct_macro_and_holiday_events(self):
+        holding = PortfolioHolding(
+            symbol="NVDA",
+            name="NVIDIA",
+            instrument_type="equity",
+            quantity=1,
+            currency_code="USD",
+            account_code="ibkr",
+            platform_name="IBKR",
+            source="fixture",
+            mapped_exchanges=("NASDAQ",),
+            themes=("semiconductor", "ai_infrastructure"),
+        )
+        earnings_event = CalendarEvent(
+            uid="earnings-nvda-2026-05-20",
+            title="NVIDIA (NVDA) 财报 - 盘后",
+            start=dt.date(2026, 5, 20),
+            end=dt.date(2026, 5, 21),
+            all_day=True,
+            timezone="America/New_York",
+            description="Ticker: NVDA",
+        )
+        macro_event = CalendarEvent(
+            uid="economic-cpi-2026-06-10-free",
+            title="美国 CPI - 高影响",
+            start=dt.datetime(2026, 6, 10, 8, 30),
+            end=dt.datetime(2026, 6, 10, 9, 0),
+            all_day=False,
+            timezone="America/New_York",
+            description="影响对象:\n美股指数、半导体、成长股",
+        )
+        holiday_event = CalendarEvent(
+            uid="holiday-us-market-memorial-day",
+            title="美股休市 - Memorial Day",
+            start=dt.date(2026, 5, 25),
+            end=dt.date(2026, 5, 26),
+            all_day=True,
+            timezone="America/New_York",
+            description="交易所: NASDAQ, NYSE",
+        )
+
+        self.assertEqual(100, holding_event_impact(earnings_event, holding, {"NVDA"}, {"NASDAQ"})[0])
+        self.assertGreaterEqual(holding_event_impact(macro_event, holding, {"NVDA"}, {"NASDAQ"})[0], 65)
+        self.assertEqual(80, holding_event_impact(holiday_event, holding, {"NVDA"}, {"NASDAQ"})[0])
+
+    def test_prioritized_sort_keeps_chronology_then_impact(self):
+        holding = PortfolioHolding(
+            symbol="NVDA",
+            name="NVIDIA",
+            instrument_type="equity",
+            quantity=1,
+            currency_code="USD",
+            account_code=None,
+            platform_name=None,
+            source="fixture",
+            mapped_exchanges=("NASDAQ",),
+            themes=("semiconductor",),
+        )
+        context = type(
+            "Context",
+            (),
+            {"enabled": True, "holdings": (holding,)},
+        )()
+        low = CalendarEvent(
+            uid="manual-note",
+            title="Other",
+            start=dt.datetime(2026, 5, 20, 9, 0),
+            end=dt.datetime(2026, 5, 20, 9, 30),
+            all_day=False,
+            timezone="America/New_York",
+            description="",
+        )
+        high = CalendarEvent(
+            uid="earnings-nvda",
+            title="NVIDIA (NVDA) 财报 - 盘后",
+            start=dt.datetime(2026, 5, 20, 9, 0),
+            end=dt.datetime(2026, 5, 20, 9, 30),
+            all_day=False,
+            timezone="America/New_York",
+            description="Ticker: NVDA",
+        )
+
+        self.assertEqual([high, low], sorted([low, high], key=lambda event: prioritized_event_sort_key(event, context)))
+
+    def test_portfolio_market_value_weight_boosts_impact_score(self):
+        large = PortfolioHolding(
+            symbol="NVDA",
+            name="NVIDIA",
+            instrument_type="equity",
+            quantity=1,
+            currency_code="USD",
+            account_code=None,
+            platform_name=None,
+            source="fixture",
+            market_value=9000,
+            mapped_exchanges=("NASDAQ",),
+            themes=("semiconductor",),
+        )
+        small = PortfolioHolding(
+            symbol="AMD",
+            name="AMD",
+            instrument_type="equity",
+            quantity=1,
+            currency_code="USD",
+            account_code=None,
+            platform_name=None,
+            source="fixture",
+            market_value=1000,
+            mapped_exchanges=("NASDAQ",),
+            themes=("semiconductor",),
+        )
+        context = type("Context", (), {"enabled": True, "holdings": (large, small)})()
+        event = CalendarEvent(
+            uid="economic-cpi-2026-06-10-free",
+            title="美国 CPI - 高影响",
+            start=dt.datetime(2026, 6, 10, 8, 30),
+            end=dt.datetime(2026, 6, 10, 9, 0),
+            all_day=False,
+            timezone="America/New_York",
+            description="影响对象:\n美股指数、半导体、成长股",
+            category="macro",
+        )
+
+        self.assertGreater(portfolio_event_impact_score(event, context), 70)
 
     def test_calculated_market_holidays_are_deduped_across_exchanges(self):
         events = build_us_market_holiday_events(
@@ -399,6 +681,122 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertIn("美股休市 - Memorial Day", titles)
         self.assertIn(dt.date(2026, 5, 25), dates)
         self.assertIn(dt.date(2026, 6, 3), dates)
+
+    def test_generic_exchange_holidays_support_non_us_markets(self):
+        events = build_generic_exchange_market_holiday_events(
+            "TSE",
+            dt.date(2026, 1, 1),
+            dt.date(2026, 1, 10),
+            1,
+        )
+
+        self.assertTrue(any(event.title.startswith("TSE 休市") for event in events))
+        self.assertTrue(all(event.timezone == "Asia/Tokyo" for event in events))
+        self.assertTrue(all("交易所: TSE" in event.description for event in events))
+
+    def test_calculated_market_holidays_dispatch_generic_exchanges(self):
+        events = build_calculated_market_holiday_events(
+            ["TSE", "TWSE", "LSE", "EURONEXT"],
+            dt.date(2026, 1, 1),
+            dt.date(2026, 1, 10),
+            "America/New_York",
+            1,
+        )
+
+        titles = [event.title for event in events]
+        self.assertTrue(any(title.startswith("TSE 休市") for title in titles))
+        self.assertTrue(any(title.startswith("TWSE 休市") for title in titles))
+
+    def test_dashboard_html_contains_key_sections(self):
+        event = CalendarEvent(
+            uid="earnings-nvda",
+            title="NVIDIA (NVDA) 财报 - 盘后",
+            start=dt.date(2026, 5, 20),
+            end=dt.date(2026, 5, 21),
+            all_day=True,
+            timezone="America/New_York",
+            description="Ticker: NVDA",
+            url="https://www.tradingview.com/chart/?symbol=NASDAQ%3ANVDA",
+        )
+        html_text = render_dashboard_html(
+            {
+                "generated_at_utc": "2026-05-21T00:00:00+00:00",
+                "watchlist_count": 1,
+                "event_counts": {"total": 1, "earnings": 1, "macro": 0, "holiday": 0, "manual": 0},
+                "earnings_coverage": {"rows_total": 1},
+                "portfolio_event_impact": {"enabled": True},
+                "portfolio_context": {"enabled": True},
+                "macro_audit": [],
+                "warnings": [],
+            },
+            [event],
+        )
+
+        self.assertIn("事件列表", html_text)
+        self.assertIn("未来 7 天", html_text)
+        self.assertIn("高影响事项", html_text)
+        self.assertIn("财报覆盖", html_text)
+        self.assertIn("NVIDIA (NVDA)", html_text)
+
+    def test_url_validation_can_be_disabled(self):
+        event = CalendarEvent(
+            uid="manual-test",
+            title="Manual",
+            start=dt.date(2026, 5, 1),
+            end=dt.date(2026, 5, 2),
+            all_day=True,
+            timezone="America/New_York",
+            description="官方页面: https://example.com",
+            url="https://example.com",
+        )
+
+        result = validate_event_urls([event], enabled=False, max_urls=10, timeout_seconds=1, max_elapsed_seconds=1)
+
+        self.assertFalse(result["enabled"])
+        self.assertEqual(0, result["checked"])
+
+    def test_url_validation_layers_and_skips_apple_scheme(self):
+        event = CalendarEvent(
+            uid="earnings-amd",
+            title="AMD 财报 - 盘后",
+            start=dt.date(2026, 5, 1),
+            end=dt.date(2026, 5, 2),
+            all_day=True,
+            timezone="America/New_York",
+            description="Apple Stocks: stocks://?symbol=AMD",
+        )
+
+        result = validate_event_urls([event], enabled=True, max_urls=10, timeout_seconds=1, max_elapsed_seconds=1)
+
+        self.assertEqual(1, result["checked"])
+        self.assertEqual([], result["failures"])
+        self.assertEqual("apple_stocks_scheme", result["results"][0]["role"])
+
+    def test_url_validation_marks_official_403_as_blocked(self):
+        error = urllib.error.HTTPError(
+            url="https://www.bls.gov/schedule/news_release/cpi.htm",
+            code=403,
+            msg="Forbidden",
+            hdrs=None,
+            fp=None,
+        )
+
+        with patch("scripts.generate_calendar.urllib.request.urlopen", side_effect=error):
+            result = validate_url("https://www.bls.gov/schedule/news_release/cpi.htm", timeout_seconds=1)
+
+        self.assertEqual("blocked", result["status"])
+        self.assertEqual(403, result["status_code"])
+        self.assertTrue(result["official_domain"])
+
+    def test_launchd_plist_builder_defaults_to_generate_only(self):
+        plist_data = build_launchd_plist(repo_root=ROOT, hour=17, minute=30, sync_apple_calendar=False)
+
+        command = plist_data["ProgramArguments"][2]
+        self.assertIn("scripts/generate_calendar.py", command)
+        self.assertNotIn("sync_apple_calendar.py --apply", command)
+
+        sync_plist = build_launchd_plist(repo_root=ROOT, hour=17, minute=30, sync_apple_calendar=True)
+        self.assertIn("sync_apple_calendar.py --apply", sync_plist["ProgramArguments"][2])
 
     def test_portfolio_context_adds_holdings_and_infers_holidays(self):
         config = {

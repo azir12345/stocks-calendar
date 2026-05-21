@@ -10,16 +10,100 @@ symbols:
     earnings_symbol: 1810.HK
     earnings_timezone: Asia/Hong_Kong
     include_earnings: true
+    themes:
+      - china_hk_tech
+      - consumer_electronics
+      - adr
     notes: Xiaomi ADR maps to Hong Kong ordinary shares for issuer events.
+  - symbol: HSBC
+    canonical_symbol: HSBA.L
+    name: HSBC Holdings plc
+    tradingview: NYSE:HSBC
+    exchanges:
+      - NYSE
+      - LSE
+    timezone: Europe/London
+    earnings_symbol: HSBA
+    earnings_timezone: Europe/London
+    include_earnings: true
+    themes:
+      - bank
+      - rates_sensitive
+      - financial
+      - uk_equity
+      - adr
+    notes: HSBC ADR maps to the London primary listing for issuer timing and LSE holiday exposure.
+  - symbol: TSM
+    name: Taiwan Semiconductor Manufacturing
+    tradingview: NYSE:TSM
+    exchanges:
+      - NYSE
+      - TWSE
+    timezone: Asia/Taipei
+    include_earnings: true
+    themes:
+      - semiconductor
+      - foundry
+      - taiwan
+      - adr
+    notes: TSM ADR is linked to Taiwan local-market exposure for holiday and theme analysis.
+  - symbol: TM
+    name: Toyota Motor
+    tradingview: NYSE:TM
+    exchanges:
+      - NYSE
+      - TSE
+    timezone: Asia/Tokyo
+    include_earnings: true
+    themes:
+      - auto
+      - japan_equity
+      - adr
+    notes: Toyota ADR is linked to Tokyo local-market exposure for holiday and theme analysis.
+  - symbol: STM
+    name: STMicroelectronics
+    tradingview: NYSE:STM
+    exchanges:
+      - NYSE
+      - EURONEXT
+    timezone: Europe/Paris
+    include_earnings: true
+    themes:
+      - semiconductor
+      - industrial
+      - europe_equity
+      - adr
+    notes: STM ADR is linked to European local-market exposure for holiday and theme analysis.
+  - symbol: NOK
+    name: Nokia
+    tradingview: NYSE:NOK
+    exchanges:
+      - NYSE
+      - EURONEXT
+    timezone: Europe/Paris
+    include_earnings: true
+    themes:
+      - telecom
+      - europe_equity
+      - adr
+    notes: Nokia ADR is linked to European local-market exposure for holiday and theme analysis.
   - symbol: DRAM
     name: Roundhill Memory ETF
     exchanges:
       - NASDAQ
     include_earnings: false
+    themes:
+      - memory
+      - semiconductor
+      - etf
     notes: ETF holding; use for market holidays and macro exposure, not corporate earnings.
   - symbol: SNXX
     name: Tradr 2X Long SNDK Daily ETF
     exchanges:
       - NASDAQ
     include_earnings: false
+    themes:
+      - sandisk
+      - leveraged_etf
+      - semiconductor
     notes: Leveraged ETF holding; use for market holidays and macro exposure, not corporate earnings.

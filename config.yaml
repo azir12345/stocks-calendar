@@ -7,13 +7,31 @@ calendar:
   reminder_days_before: 1
   output_path: public/earnings.ics
   status_path: public/status.json
+  dashboard_path: public/dashboard.html
+  compact_titles: true
+  ics_filter:
+    min_impact_score: 70
+    include_official_earnings: true
 
 earnings:
   provider: fmp
   require_confirmed_only: false
+  include_observation_events: true
+  official_ir_cache:
+    path: .cache/official_ir_earnings.json
+    ttl_hours: 18
+    max_urls_per_symbol: 4
+    timeout_seconds: 6
+    max_elapsed_seconds: 45
   enrichment:
     nasdaq:
       enabled: true
+
+url_validation:
+  enabled: true
+  max_urls: 80
+  timeout_seconds: 4
+  max_elapsed_seconds: 20
 
 links:
   include_tradingview: true

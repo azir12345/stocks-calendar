@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime as dt
 import hashlib
 import html
@@ -13,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -35,6 +37,7 @@ BLS_SCHEDULE_URLS = {
 }
 BEA_SCHEDULE_URL = "https://www.bea.gov/news/schedule"
 DEFAULT_MACRO_SCHEDULE_FILE = "data/official_macro_releases.yaml"
+DEFAULT_OFFICIAL_IR_CACHE_FILE = ".cache/official_ir_earnings.json"
 DEFAULT_TIMEZONE = "America/New_York"
 
 WATCHLIST_TEXT = "INTC, NVDA, AMD, SNDK, STX, WDC, HSBC, AAPL, MSFT, TSLA, GOOG, IBKR, META, TSM, AVGO, QCOM, ARM, DELL, MU, GM, GE, IBM, AMZN"
@@ -213,11 +216,125 @@ CATEGORY_OFFICIAL_URLS = {
 EXCHANGE_HOLIDAY_URLS = {
     "NASDAQ": "https://www.nasdaq.com/market-activity/stock-market-holiday-schedule",
     "NYSE": "https://www.nyse.com/markets/hours-calendars",
-    "KRX": "https://global.krx.co.kr/contents/GLB/06/0602/0602010000/GLB0602010000.jsp",
+    "KRX": "https://global.krx.co.kr/contents/GLB/06/0606/0606030101/GLB0606030101T3.jsp",
     "HKEX": "https://www.hkex.com.hk/Services/Trading/Securities/Overview/Trading-Calendar-and-Trading-Hours",
+    "TSE": "https://www.jpx.co.jp/english/corporate/about-jpx/calendar/",
+    "TWSE": "https://www.twse.com.tw/en/holidaySchedule/holidaySchedule",
+    "LSE": "https://www.londonstockexchange.com/personal-investing/tools/market-hours",
+    "EURONEXT": "https://www.euronext.com/en/trade/trading-hours-holidays",
+}
+
+GENERIC_EXCHANGE_HOLIDAY_RULES = {
+    "TSE": {
+        "country": "JP",
+        "timezone": "Asia/Tokyo",
+        "title_prefix": "TSE 休市",
+        "event_label": "东京证券交易所休市",
+        "description": "日本股票、ETF、日股基金申赎，以及相关 ADR/跨市场预期",
+    },
+    "TWSE": {
+        "country": "TW",
+        "timezone": "Asia/Taipei",
+        "title_prefix": "TWSE 休市",
+        "event_label": "台湾证券交易所休市",
+        "description": "台湾股票、ETF、台股基金申赎，以及半导体供应链预期",
+    },
+    "LSE": {
+        "country": "GB",
+        "timezone": "Europe/London",
+        "title_prefix": "LSE 休市",
+        "event_label": "伦敦证券交易所休市",
+        "description": "英国股票、ETF、ADR 原股，以及英镑资产流动性",
+    },
+    "EURONEXT": {
+        "country": "FR",
+        "timezone": "Europe/Paris",
+        "title_prefix": "Euronext 休市",
+        "event_label": "Euronext 休市",
+        "description": "欧洲股票、ETF、欧元资产流动性和跨市场预期",
+    },
 }
 
 WITCHING_OFFICIAL_URL = "https://www.theocc.com/webapps/weekly-options"
+
+SUPPORTED_EXCHANGES = {"NASDAQ", "NYSE", "KRX", "HKEX", *GENERIC_EXCHANGE_HOLIDAY_RULES}
+
+SYMBOL_THEME_RULES: dict[str, tuple[str, ...]] = {
+    "NVDA": ("semiconductor", "ai_infrastructure", "megacap_growth"),
+    "AMD": ("semiconductor", "ai_infrastructure", "cpu_gpu"),
+    "INTC": ("semiconductor", "cpu_gpu"),
+    "AVGO": ("semiconductor", "ai_infrastructure", "networking"),
+    "QCOM": ("semiconductor", "mobile"),
+    "ARM": ("semiconductor", "cpu_ip"),
+    "TSM": ("semiconductor", "foundry", "taiwan"),
+    "STM": ("semiconductor", "europe_equity", "industrial"),
+    "MU": ("semiconductor", "memory"),
+    "000660.KS": ("semiconductor", "memory", "korea_equity"),
+    "005930.KS": ("semiconductor", "memory", "korea_equity", "consumer_electronics"),
+    "STX": ("storage", "hardware"),
+    "WDC": ("storage", "memory", "hardware"),
+    "SNDK": ("storage", "memory"),
+    "DELL": ("hardware", "ai_infrastructure", "enterprise_it"),
+    "AAPL": ("consumer_electronics", "megacap_growth"),
+    "MSFT": ("software", "ai_infrastructure", "megacap_growth"),
+    "GOOG": ("internet", "advertising", "ai_infrastructure", "megacap_growth"),
+    "META": ("internet", "advertising", "ai_infrastructure", "megacap_growth"),
+    "AMZN": ("ecommerce", "cloud", "megacap_growth"),
+    "TSLA": ("auto", "consumer_discretionary", "megacap_growth"),
+    "GM": ("auto", "industrial"),
+    "GE": ("industrial", "aerospace"),
+    "IBM": ("enterprise_it", "software"),
+    "IBKR": ("broker", "rates_sensitive", "financial"),
+    "HSBC": ("bank", "rates_sensitive", "financial", "uk_equity", "adr"),
+    "NOK": ("telecom", "europe_equity", "adr"),
+    "TM": ("auto", "japan_equity", "adr"),
+    "PFE": ("healthcare", "pharma"),
+    "XIACY": ("china_hk_tech", "consumer_electronics", "adr"),
+    "1810.HK": ("china_hk_tech", "consumer_electronics", "hk_equity"),
+    "DRAM": ("memory", "semiconductor", "etf"),
+    "SNXX": ("sandisk", "leveraged_etf", "semiconductor"),
+}
+
+MACRO_THEME_IMPACT_RULES: dict[str, tuple[tuple[set[str], int, str], ...]] = {
+    "fomc_rate": (
+        ({"rates_sensitive", "bank", "broker", "financial"}, 75, "利率敏感持仓直接受美联储路径影响"),
+        ({"semiconductor", "ai_infrastructure", "megacap_growth", "software", "internet"}, 65, "成长/科技估值对利率路径敏感"),
+        ({"auto", "consumer_discretionary"}, 55, "融资成本和消费信贷会影响汽车/消费需求"),
+    ),
+    "fomc_minutes": (
+        ({"rates_sensitive", "bank", "broker", "financial"}, 70, "纪要会改变市场对利率路径的定价"),
+        ({"semiconductor", "ai_infrastructure", "megacap_growth", "software", "internet"}, 60, "长久期成长股对利率预期敏感"),
+    ),
+    "cpi": (
+        ({"semiconductor", "ai_infrastructure", "megacap_growth", "software", "internet"}, 70, "通胀影响折现率和成长股估值"),
+        ({"rates_sensitive", "bank", "broker", "financial"}, 65, "通胀会牵动降息/加息预期"),
+        ({"auto", "consumer_discretionary"}, 55, "通胀影响消费者实际购买力"),
+    ),
+    "pce": (
+        ({"semiconductor", "ai_infrastructure", "megacap_growth", "software", "internet"}, 70, "PCE 是美联储重点通胀口径"),
+        ({"rates_sensitive", "bank", "broker", "financial"}, 65, "PCE 会改变利率预期"),
+    ),
+    "nfp": (
+        ({"rates_sensitive", "bank", "broker", "financial"}, 70, "就业数据影响利率、交易活跃度和信贷预期"),
+        ({"auto", "industrial", "consumer_discretionary"}, 60, "就业强弱会影响周期和消费需求"),
+        ({"semiconductor", "megacap_growth"}, 55, "就业数据通过利率预期影响成长估值"),
+    ),
+    "ism_manufacturing": (
+        ({"semiconductor", "memory", "storage", "hardware", "industrial"}, 70, "制造业景气度会影响硬件和半导体需求预期"),
+    ),
+    "ism_services": (
+        ({"software", "internet", "cloud", "ecommerce", "enterprise_it"}, 60, "服务业景气度影响软件、广告和电商需求预期"),
+    ),
+    "retail_sales": (
+        ({"ecommerce", "consumer_electronics", "auto", "consumer_discretionary"}, 65, "零售销售会影响消费硬件、电商和汽车需求预期"),
+    ),
+    "gdp": (
+        ({"industrial", "auto", "financial", "ecommerce", "enterprise_it"}, 55, "GDP 影响整体盈利和周期预期"),
+    ),
+    "ppi": (
+        ({"industrial", "auto", "hardware", "semiconductor"}, 55, "PPI 会影响制造成本和利润率预期"),
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -230,6 +347,8 @@ class WatchSymbol:
     timezone: str | None = None
     ir_url: str | None = None
     ir_press_releases_rss: str | None = None
+    preferred_ir_url_patterns: tuple[str, ...] = ()
+    skip_ir_url_patterns: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -242,10 +361,14 @@ class PortfolioHolding:
     account_code: str | None
     platform_name: str | None
     source: str
+    market_value: float | None = None
+    cost_basis: float | None = None
+    unrealized_pnl: float | None = None
     canonical_symbol: str | None = None
     include_earnings: bool = True
     mapping_note: str | None = None
     mapped_exchanges: tuple[str, ...] = ()
+    themes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -259,6 +382,9 @@ class SymbolMapping:
     earnings_symbols: tuple[str, ...] = ()
     earnings_timezone: str | None = None
     include_earnings: bool = True
+    themes: tuple[str, ...] = ()
+    preferred_ir_url_patterns: tuple[str, ...] = ()
+    skip_ir_url_patterns: tuple[str, ...] = ()
     notes: str | None = None
 
 
@@ -286,6 +412,8 @@ class CalendarEvent:
     description: str
     url: str | None = None
     reminder_days_before: int | None = None
+    category: str = "other"
+    confidence: str = "provider_confirmed"
 
 
 def main() -> int:
@@ -314,6 +442,17 @@ def main() -> int:
     timed_event_minutes = int(calendar_config.get("timed_event_minutes", 30))
     output_path = root / (args.output or calendar_config.get("output_path", "public/earnings.ics"))
     status_path = root / str(calendar_config.get("status_path", "public/status.json"))
+    dashboard_path = root / str(calendar_config.get("dashboard_path", "public/dashboard.html"))
+    earnings_config = config.get("earnings", {})
+    official_ir_cache_config = earnings_config.get("official_ir_cache", {})
+    official_ir_cache_path = root / str(official_ir_cache_config.get("path", DEFAULT_OFFICIAL_IR_CACHE_FILE))
+    official_ir_cache_ttl_hours = int(official_ir_cache_config.get("ttl_hours", 18))
+    official_ir_max_urls_per_symbol = int(official_ir_cache_config.get("max_urls_per_symbol", 4))
+    official_ir_timeout_seconds = float(official_ir_cache_config.get("timeout_seconds", 6))
+    official_ir_max_elapsed_seconds = float(official_ir_cache_config.get("max_elapsed_seconds", 45))
+    ics_filter_config = calendar_config.get("ics_filter", {})
+    ics_min_impact_score = int(ics_filter_config.get("min_impact_score", 0))
+    ics_include_official_earnings = bool(ics_filter_config.get("include_official_earnings", True))
 
     today = dt.datetime.now(ZoneInfo(timezone)).date()
     end_date = today + dt.timedelta(days=window_days)
@@ -342,10 +481,16 @@ def main() -> int:
                 start_date=today,
                 end_date=end_date,
                 default_timezone=timezone,
+                cache_path=official_ir_cache_path,
+                cache_ttl_hours=official_ir_cache_ttl_hours,
+                max_urls_per_symbol=official_ir_max_urls_per_symbol,
+                timeout_seconds=official_ir_timeout_seconds,
+                max_elapsed_seconds=official_ir_max_elapsed_seconds,
             ),
             watch_symbols=watch_symbols,
             default_timezone=timezone,
         )
+    earnings_rows = dedupe_earnings_rows(earnings_rows, watch_symbols, timezone)
     events = build_earnings_events(
         rows=earnings_rows,
         watch_symbols=watch_symbols,
@@ -353,6 +498,8 @@ def main() -> int:
         reminder_days=reminder_days,
         timed_event_minutes=timed_event_minutes,
         links_config=config.get("links", {}),
+        include_observation_events=bool(config.get("earnings", {}).get("include_observation_events", True)),
+        compact_titles=bool(calendar_config.get("compact_titles", False)),
     )
     if not args.skip_auto_financial_events:
         events.extend(
@@ -368,43 +515,46 @@ def main() -> int:
             )
         )
     events.extend(load_manual_financial_events(root=root, config=config, default_timezone=timezone, reminder_days=reminder_days))
-    events = sorted(events, key=event_sort_key)
+    events = sorted(events, key=lambda event: prioritized_event_sort_key(event, portfolio_context))
+    calendar_events = filter_ics_events(
+        events,
+        portfolio_context,
+        min_impact_score=ics_min_impact_score,
+        include_official_earnings=ics_include_official_earnings,
+    )
 
     calendar_name = str(calendar_config.get("name", "US Earnings Watchlist"))
     calendar_description = str(calendar_config.get("description", calendar_name))
     calendar_text = reuse_previous_calendar_if_empty(
-        rendered_calendar=render_ics(calendar_name, calendar_description, events),
-        events=events,
+        rendered_calendar=render_ics(calendar_name, calendar_description, calendar_events),
+        events=calendar_events,
         warnings=warnings,
         output_path=output_path,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(calendar_text, encoding="utf-8")
-    status_path.parent.mkdir(parents=True, exist_ok=True)
-    status_path.write_text(
-        json.dumps(
-            build_status(
-                events=events,
-                earnings_rows=earnings_rows,
-                watch_symbols=watch_symbols,
-                portfolio_context=portfolio_context,
-                start_date=today,
-                end_date=end_date,
-                timezone=timezone,
-                output_path=output_path,
-                nasdaq_enrichment_enabled=nasdaq_enrichment_enabled,
-                warnings=warnings,
-            ),
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
+    status_data = build_status(
+        events=events,
+        published_events=calendar_events,
+        earnings_rows=earnings_rows,
+        watch_symbols=watch_symbols,
+        portfolio_context=portfolio_context,
+        start_date=today,
+        end_date=end_date,
+        timezone=timezone,
+        output_path=output_path,
+        nasdaq_enrichment_enabled=nasdaq_enrichment_enabled,
+        config=config,
+        warnings=warnings,
     )
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(json.dumps(status_data, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    dashboard_path.parent.mkdir(parents=True, exist_ok=True)
+    dashboard_path.write_text(render_dashboard_html(status_data, events), encoding="utf-8")
 
-    print(f"Wrote {len(events)} events to {output_path}")
+    print(f"Wrote {len(calendar_events)} published events to {output_path} ({len(events)} total dashboard/status events)")
     print(f"Wrote status to {status_path}")
+    print(f"Wrote dashboard to {dashboard_path}")
     return 0
 
 
@@ -523,6 +673,9 @@ def load_symbol_mappings(path: Path) -> dict[str, SymbolMapping]:
             earnings_symbols=tuple(earnings_values),
             earnings_timezone=as_optional_str(row.get("earnings_timezone")),
             include_earnings=bool(row.get("include_earnings", True)),
+            themes=tuple(str(item).strip().lower() for item in row.get("themes", []) or [] if str(item).strip()),
+            preferred_ir_url_patterns=parse_string_tuple(row.get("preferred_ir_url_patterns")),
+            skip_ir_url_patterns=parse_string_tuple(row.get("skip_ir_url_patterns")),
             notes=as_optional_str(row.get("notes")),
         )
     return mappings
@@ -551,6 +704,9 @@ def load_portfolio_holdings_from_personalhub_postgres(
         instrument_type,
         currency_code,
         quantity,
+        market_value,
+        cost_basis,
+        unrealized_pnl,
         current_position_source
       FROM hub.v_investment_current_position_estimated
       WHERE ABS(quantity) > 0.00000001
@@ -664,6 +820,14 @@ def portfolio_holdings_from_rows(
             continue
         mapping = symbol_mappings.get(symbol)
         include_earnings = mapped_include_earnings(row, mapping)
+        canonical_symbol = mapping.canonical_symbol if mapping else None
+        themes = infer_holding_themes(
+            symbol=symbol,
+            canonical_symbol=canonical_symbol,
+            name=(mapping.name if mapping and mapping.name else as_optional_str(row.get("name"))),
+            instrument_type=instrument_type,
+            mapping=mapping,
+        )
         holdings.append(
             PortfolioHolding(
                 symbol=symbol,
@@ -674,13 +838,46 @@ def portfolio_holdings_from_rows(
                 account_code=as_optional_str(row.get("account_code")),
                 platform_name=as_optional_str(row.get("platform_name")),
                 source=as_optional_str(row.get("current_position_source")) or source,
-                canonical_symbol=mapping.canonical_symbol if mapping else None,
+                market_value=parse_float(row.get("market_value")),
+                cost_basis=parse_float(row.get("cost_basis")),
+                unrealized_pnl=parse_float(row.get("unrealized_pnl")),
+                canonical_symbol=canonical_symbol,
                 include_earnings=include_earnings,
                 mapping_note=mapping.notes if mapping else None,
                 mapped_exchanges=mapping.exchanges if mapping else (),
+                themes=themes,
             )
         )
     return holdings
+
+
+def infer_holding_themes(
+    *,
+    symbol: str,
+    canonical_symbol: str | None,
+    name: str | None,
+    instrument_type: str | None,
+    mapping: SymbolMapping | None,
+) -> tuple[str, ...]:
+    themes: set[str] = set(mapping.themes if mapping else ())
+    for key in (symbol.upper(), (canonical_symbol or "").upper()):
+        themes.update(SYMBOL_THEME_RULES.get(key, ()))
+    normalized_name = str(name or "").lower()
+    keyword_themes = (
+        (("semiconductor", "chip", "hynix", "micron", "nvidia", "amd", "tsmc"), "semiconductor"),
+        (("memory", "dram", "nand", "storage", "sandisk", "seagate", "western digital"), "memory"),
+        (("bank", "broker", "interactive brokers", "hsbc"), "financial"),
+        (("etf", "fund"), "etf"),
+        (("2x", "leveraged", "daily"), "leveraged_etf"),
+        (("toyota", "tesla", "motor", "automotive"), "auto"),
+        (("pharma", "pfizer"), "pharma"),
+    )
+    for keywords, theme in keyword_themes:
+        if any(keyword in normalized_name for keyword in keywords):
+            themes.add(theme)
+    if instrument_type and str(instrument_type).lower() == "etf":
+        themes.add("etf")
+    return tuple(sorted(themes))
 
 
 def mapped_include_earnings(row: dict[str, Any], mapping: SymbolMapping | None) -> bool:
@@ -766,6 +963,14 @@ def infer_timezone_from_holding(holding: PortfolioHolding) -> str | None:
         return "Asia/Seoul"
     if "HKEX" in exchanges:
         return "Asia/Hong_Kong"
+    if "TSE" in exchanges:
+        return "Asia/Tokyo"
+    if "TWSE" in exchanges:
+        return "Asia/Taipei"
+    if "LSE" in exchanges:
+        return "Europe/London"
+    if "EURONEXT" in exchanges:
+        return "Europe/Paris"
     return None
 
 
@@ -798,7 +1003,7 @@ def infer_exchanges_for_holding(
             normalized = exchange.upper()
             if normalized == "OTC":
                 exchanges.update({"NASDAQ", "NYSE"})
-            elif normalized in {"NASDAQ", "NYSE", "KRX", "HKEX"}:
+            elif normalized in SUPPORTED_EXCHANGES:
                 exchanges.add(normalized)
         if exchanges:
             return exchanges
@@ -806,17 +1011,33 @@ def infer_exchanges_for_holding(
     watch_item = watch_by_symbol.get(symbol) or watch_by_symbol.get(holding.symbol.upper())
     tradingview = (watch_item.tradingview if watch_item else None) or infer_tradingview_from_holding(holding) or ""
     prefix = tradingview.split(":", 1)[0].upper() if ":" in tradingview else ""
-    if prefix in {"NASDAQ", "NYSE", "KRX", "HKEX"}:
+    if prefix in SUPPORTED_EXCHANGES:
         return {prefix}
     if symbol.endswith((".KS", ".KQ")):
         return {"KRX"}
     if symbol.endswith(".HK"):
         return {"HKEX"}
+    if symbol.endswith(".T"):
+        return {"TSE"}
+    if symbol.endswith(".TW"):
+        return {"TWSE"}
+    if symbol.endswith(".L"):
+        return {"LSE"}
+    if symbol.endswith((".PA", ".AS", ".BR", ".MI", ".LS")):
+        return {"EURONEXT"}
     currency = (holding.currency_code or "").upper()
     if currency == "KRW":
         return {"KRX"}
     if currency == "HKD":
         return {"HKEX"}
+    if currency == "JPY":
+        return {"TSE"}
+    if currency == "TWD":
+        return {"TWSE"}
+    if currency == "GBP":
+        return {"LSE"}
+    if currency == "EUR":
+        return {"EURONEXT"}
     if currency == "USD":
         return {"NASDAQ", "NYSE"}
     return set()
@@ -825,6 +1046,7 @@ def infer_exchanges_for_holding(
 def build_status(
     *,
     events: list[CalendarEvent],
+    published_events: list[CalendarEvent] | None = None,
     earnings_rows: list[dict[str, Any]] | None = None,
     watch_symbols: list[WatchSymbol],
     portfolio_context: PortfolioContext | None = None,
@@ -833,6 +1055,7 @@ def build_status(
     timezone: str,
     output_path: Path,
     nasdaq_enrichment_enabled: bool,
+    config: dict[str, Any] | None = None,
     warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     counts = {
@@ -844,17 +1067,22 @@ def build_status(
         "other": 0,
     }
     for event in events:
-        if event.uid.startswith("earnings-"):
+        category = event_category(event)
+        if category == "earnings":
             counts["earnings"] += 1
-        elif event.uid.startswith("economic-"):
+        elif category == "macro":
             counts["macro"] += 1
-        elif event.uid.startswith("holiday-"):
+        elif category == "holiday":
             counts["holiday"] += 1
-        elif event.uid.startswith("manual-"):
+        elif category == "manual":
             counts["manual"] += 1
         else:
             counts["other"] += 1
 
+    config = config or {}
+    url_validation_config = config.get("url_validation", {})
+    url_validation_enabled = bool(url_validation_config.get("enabled", True))
+    published_events = published_events if published_events is not None else events
     return {
         "generated_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "window": {
@@ -862,6 +1090,9 @@ def build_status(
             "end": end_date.isoformat(),
             "timezone": timezone,
         },
+        "published_event_count": len(published_events),
+        "confidence_counts": build_confidence_counts(events),
+        "event_summary": build_event_summary(events, portfolio_context),
         "watchlist_count": len(watch_symbols),
         "watchlist_symbols": [item.symbol for item in watch_symbols],
         "symbol_timezones": {
@@ -875,18 +1106,188 @@ def build_status(
             watch_symbols=watch_symbols,
             default_timezone=timezone,
         ),
+        "official_ir_cache_audit": build_official_ir_cache_audit(config),
         "macro_audit": build_macro_audit_status(events),
         "portfolio_context": build_portfolio_context_status(portfolio_context),
         "portfolio_event_impact": build_portfolio_event_impact_status(events, portfolio_context),
+        "url_validation": validate_event_urls(
+            events,
+            enabled=url_validation_enabled,
+            max_urls=int(url_validation_config.get("max_urls", 80)),
+            timeout_seconds=float(url_validation_config.get("timeout_seconds", 4)),
+            max_elapsed_seconds=float(url_validation_config.get("max_elapsed_seconds", 20)),
+        ),
         "output_file": str(output_path),
         "warnings": warnings or [],
         "data_sources": {
             "earnings": "Financial Modeling Prep earnings-calendar",
             "earnings_session_enrichment": "Nasdaq earnings calendar" if nasdaq_enrichment_enabled else None,
             "macro": "Federal Reserve + BLS/BEA official schedules + local official snapshot fallback",
-            "holidays": "Calculated US/KRX/HKEX exchange holiday rules with official links",
+            "holidays": "Calculated US/KRX/HKEX/TSE/TWSE/LSE/Euronext exchange holiday rules with official links",
         },
     }
+
+
+def event_category(event: CalendarEvent) -> str:
+    if event.category != "other":
+        return event.category
+    if event.uid.startswith(("earnings-", "earnings-call-", "earnings-observation-")):
+        return "earnings"
+    if event.uid.startswith("economic-"):
+        return "macro"
+    if event.uid.startswith("holiday-"):
+        return "holiday"
+    if event.uid.startswith("manual-"):
+        return "manual"
+    return "other"
+
+
+def build_confidence_counts(events: list[CalendarEvent]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for event in events:
+        counts[event.confidence] = counts.get(event.confidence, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def build_event_summary(events: list[CalendarEvent], portfolio_context: PortfolioContext | None) -> list[dict[str, Any]]:
+    summary: list[dict[str, Any]] = []
+    for event in events:
+        summary.append(
+            {
+                "title": event.title,
+                "start": event_start_key(event.start),
+                "category": event_category(event),
+                "confidence": event.confidence,
+                "impact_score": portfolio_event_impact_score(event, portfolio_context),
+                "url": event.url,
+            }
+        )
+    return summary
+
+
+def validate_event_urls(
+    events: list[CalendarEvent],
+    *,
+    enabled: bool,
+    max_urls: int,
+    timeout_seconds: float,
+    max_elapsed_seconds: float,
+) -> dict[str, Any]:
+    if not enabled:
+        return {"enabled": False, "checked": 0, "results": []}
+    targets = dedupe_url_targets([target for event in events for target in event_urls_for_validation(event)])
+    results: list[dict[str, Any]] = []
+    deadline = time.monotonic() + max_elapsed_seconds
+    truncated_by_timeout = False
+    for target in targets[:max_urls]:
+        if time.monotonic() >= deadline:
+            truncated_by_timeout = True
+            break
+        results.append(validate_url(str(target["url"]), timeout_seconds=timeout_seconds) | {"role": target["role"], "event_title": target["event_title"]})
+    failures = [result for result in results if result["status"] not in {"ok", "redirect", "skipped", "blocked"}]
+    return {
+        "enabled": True,
+        "checked": len(results),
+        "truncated": len(targets) > max_urls or truncated_by_timeout,
+        "timeout_truncated": truncated_by_timeout,
+        "failures": failures,
+        "results": results,
+    }
+
+
+def event_urls_for_validation(event: CalendarEvent) -> list[dict[str, str]]:
+    urls: list[dict[str, str]] = []
+    if event.url:
+        urls.append({"url": event.url, "role": "primary_event_url", "event_title": event.title})
+    label_roles = {
+        "官方页面": "official_source_url",
+        "官方财报页面": "official_source_url",
+        "TradingView": "tradingview_url",
+        "Apple Stocks": "apple_stocks_scheme",
+        "Source": "source_url",
+    }
+    for label, role in label_roles.items():
+        value = extract_description_field(event.description, label)
+        if value:
+            urls.append({"url": value, "role": role, "event_title": event.title})
+    return urls
+
+
+def dedupe_url_targets(targets: list[dict[str, str]]) -> list[dict[str, str]]:
+    deduped: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for target in targets:
+        url = str(target.get("url", "")).strip()
+        role = str(target.get("role", "")).strip()
+        if not url:
+            continue
+        key = (url, role)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append({"url": url, "role": role, "event_title": str(target.get("event_title", ""))})
+    return deduped
+
+
+def validate_url(url: str, *, timeout_seconds: float) -> dict[str, Any]:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return {"url": url, "status": "skipped", "reason": "non-http-url"}
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    for method in ("HEAD", "GET"):
+        request = urllib.request.Request(url, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                status_code = int(response.status)
+                status = "redirect" if response.geturl() != url else "ok"
+                if status_code >= 400:
+                    status = "http_error"
+                return {
+                    "url": url,
+                    "status": status,
+                    "status_code": status_code,
+                    "final_url": response.geturl(),
+                    "official_domain": likely_official_url(url),
+                }
+        except urllib.error.HTTPError as exc:
+            if method == "HEAD":
+                continue
+            status_code = int(exc.code)
+            official_domain = likely_official_url(url)
+            if status_code in {401, 403} and official_domain:
+                return {
+                    "url": url,
+                    "status": "blocked",
+                    "status_code": status_code,
+                    "error": str(exc),
+                    "official_domain": official_domain,
+                }
+            return {
+                "url": url,
+                "status": "http_error",
+                "status_code": status_code,
+                "error": str(exc),
+                "official_domain": official_domain,
+            }
+        except Exception as exc:
+            last_error = str(exc)
+            if method == "HEAD":
+                continue
+            return {"url": url, "status": "failed", "error": last_error, "official_domain": likely_official_url(url)}
+    return {"url": url, "status": "failed", "error": "unreachable", "official_domain": likely_official_url(url)}
+
+
+def likely_official_url(url: str) -> bool:
+    host = urllib.parse.urlparse(url).netloc.lower()
+    unofficial_markers = ("twitter.com", "x.com", "reddit.com", "wikipedia.org")
+    return bool(host) and not any(marker in host for marker in unofficial_markers)
 
 
 def build_earnings_coverage_status(
@@ -924,6 +1325,35 @@ def build_earnings_coverage_status(
             )
 
     watchlist_symbols = {item.symbol for item in watch_symbols}
+    watchlist_coverage = []
+    for item in watch_symbols:
+        has_ir_url = bool(item.ir_url)
+        has_ir_rss = bool(item.ir_press_releases_rss)
+        if item.symbol in symbols_with_events and has_ir_rss:
+            source_quality = "official_ir_rss_plus_event"
+        elif item.symbol in symbols_with_events and has_ir_url:
+            source_quality = "official_ir_page_plus_event"
+        elif has_ir_rss:
+            source_quality = "official_ir_rss"
+        elif has_ir_url:
+            source_quality = "official_ir_page"
+        elif item.symbol in symbols_with_events:
+            source_quality = "provider_event"
+        else:
+            source_quality = "provider_only"
+        watchlist_coverage.append(
+            {
+                "symbol": item.symbol,
+                "has_ir_url": has_ir_url,
+                "has_ir_rss": has_ir_rss,
+                "earnings_symbols": list(item.earnings_symbols or (item.symbol,)),
+                "tradingview": item.tradingview,
+                "earnings_timezone": earnings_timezone(item, default_timezone),
+                "has_event_in_window": item.symbol in symbols_with_events,
+                "source_quality": source_quality,
+                "confidence": highest_earnings_confidence_for_symbol(rows, item, default_timezone),
+            }
+        )
     return {
         "rows_total": len(rows),
         "symbols_with_events": sorted(symbols_with_events),
@@ -932,7 +1362,75 @@ def build_earnings_coverage_status(
         "nasdaq_session_enriched_rows": session_enriched,
         "timed_rows": timed_precise,
         "low_confidence_rows": low_confidence,
+        "watchlist_source_coverage": watchlist_coverage,
     }
+
+
+def highest_earnings_confidence_for_symbol(rows: list[dict[str, Any]], item: WatchSymbol, default_timezone: str) -> str | None:
+    lookup_symbols = {symbol.upper() for symbol in item.earnings_symbols or (item.symbol,)}
+    values = [
+        earnings_row_confidence(row)
+        for row in rows
+        if str(row.get("symbol", "")).upper() in lookup_symbols
+        and parse_earnings_datetime(row, earnings_timezone(item, default_timezone))[0] is not None
+    ]
+    if not values:
+        return None
+    order = {"official_confirmed": 4, "provider_confirmed": 3, "fallback_snapshot": 2, "rule_estimated": 1, "low_confidence": 0}
+    return max(values, key=lambda value: order.get(value, 0))
+
+
+def build_official_ir_cache_audit(config: dict[str, Any] | None) -> dict[str, Any]:
+    if not config:
+        return {"enabled": False}
+    cache_config = config.get("earnings", {}).get("official_ir_cache", {})
+    cache_path = Path(str(cache_config.get("path", DEFAULT_OFFICIAL_IR_CACHE_FILE)))
+    ttl_hours = int(cache_config.get("ttl_hours", 18))
+    cache = load_official_ir_cache(cache_path)
+    symbols = cache.get("symbols", {})
+    if not isinstance(symbols, dict):
+        symbols = {}
+    rows: list[dict[str, Any]] = []
+    now = dt.datetime.now(dt.timezone.utc)
+    for symbol, entry in sorted(symbols.items()):
+        if not isinstance(entry, dict):
+            continue
+        fetched_at_raw = as_optional_str(entry.get("fetched_at_utc"))
+        fetched_at = parse_cached_datetime(fetched_at_raw)
+        next_refresh = fetched_at + dt.timedelta(hours=ttl_hours) if fetched_at else None
+        cached_rows = entry.get("rows", [])
+        failures = entry.get("failures", [])
+        rows.append(
+            {
+                "symbol": symbol,
+                "fetched_at_utc": fetched_at.isoformat(timespec="seconds") if fetched_at else fetched_at_raw,
+                "next_refresh_utc": next_refresh.isoformat(timespec="seconds") if next_refresh else None,
+                "expired": bool(next_refresh and next_refresh <= now),
+                "cached_event_rows": len(cached_rows) if isinstance(cached_rows, list) else 0,
+                "urls_scanned": entry.get("urls_scanned", []),
+                "failure_count": len(failures) if isinstance(failures, list) else 0,
+                "failures": failures if isinstance(failures, list) else [],
+                "truncated": bool(entry.get("truncated", False)),
+            }
+        )
+    return {
+        "enabled": True,
+        "path": str(cache_path),
+        "ttl_hours": ttl_hours,
+        "symbols": rows,
+    }
+
+
+def parse_cached_datetime(value: str | None) -> dt.datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
 
 
 def build_portfolio_context_status(portfolio_context: PortfolioContext | None) -> dict[str, Any]:
@@ -947,8 +1445,38 @@ def build_portfolio_context_status(portfolio_context: PortfolioContext | None) -
         "added_watch_symbols": list(portfolio_context.added_watch_symbols),
         "inferred_exchanges": list(portfolio_context.inferred_exchanges),
         "holdings_by_exchange": {exchange: list(symbols) for exchange, symbols in sorted(portfolio_context.holdings_by_exchange.items())},
+        "themes_by_symbol": {
+            holding.symbol: list(holding.themes)
+            for holding in sorted(portfolio_context.holdings, key=lambda item: item.symbol)
+            if holding.themes
+        },
+        "portfolio_market_value": portfolio_total_market_value(portfolio_context.holdings),
+        "weights_by_symbol": {
+            holding.symbol: holding_weight(holding, portfolio_total_market_value(portfolio_context.holdings))
+            for holding in sorted(portfolio_context.holdings, key=lambda item: item.symbol)
+        },
+        "theme_counts": build_theme_counts(portfolio_context.holdings),
         "warnings": list(portfolio_context.warnings),
     }
+
+
+def build_theme_counts(holdings: tuple[PortfolioHolding, ...]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for holding in holdings:
+        for theme in holding.themes:
+            counts[theme] = counts.get(theme, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def portfolio_total_market_value(holdings: tuple[PortfolioHolding, ...]) -> float:
+    values = [abs(holding.market_value or 0.0) for holding in holdings]
+    return sum(value for value in values if value > 0)
+
+
+def holding_weight(holding: PortfolioHolding, total_market_value: float) -> float | None:
+    if total_market_value <= 0 or holding.market_value is None:
+        return None
+    return abs(holding.market_value) / total_market_value
 
 
 def build_macro_audit_status(events: list[CalendarEvent]) -> list[dict[str, Any]]:
@@ -984,6 +1512,7 @@ def build_portfolio_event_impact_status(
     if portfolio_context is None or not portfolio_context.enabled:
         return {"enabled": False, "holdings": []}
     holdings: list[dict[str, Any]] = []
+    total_market_value = portfolio_total_market_value(portfolio_context.holdings)
     for holding in portfolio_context.holdings:
         related_events: list[dict[str, Any]] = []
         exchanges = infer_exchanges_for_holding(holding, {})
@@ -991,26 +1520,33 @@ def build_portfolio_event_impact_status(
         if holding.canonical_symbol:
             symbols_to_match.add(holding.canonical_symbol)
         for event in events:
-            match_reasons = event_match_reasons(event, symbols_to_match, exchanges)
+            impact_score, match_reasons = holding_event_impact(event, holding, symbols_to_match, exchanges)
             if not match_reasons:
                 continue
+            weighted_score = weighted_impact_score(impact_score, holding, total_market_value)
             related_events.append(
                 {
                     "title": event.title,
                     "start": event_start_key(event.start),
                     "url": event.url,
+                    "impact_score": impact_score,
+                    "weighted_impact_score": weighted_score,
                     "match_reasons": match_reasons,
                 }
             )
+        related_events.sort(key=lambda item: (-int(item["weighted_impact_score"]), str(item["start"]), str(item["title"])))
         holdings.append(
             {
                 "symbol": holding.symbol,
                 "canonical_symbol": holding.canonical_symbol,
                 "name": holding.name,
                 "quantity": holding.quantity,
+                "market_value": holding.market_value,
+                "portfolio_weight": holding_weight(holding, total_market_value),
                 "currency_code": holding.currency_code,
                 "account_code": holding.account_code,
                 "exchanges": sorted(exchanges),
+                "themes": list(holding.themes),
                 "include_earnings": holding.include_earnings,
                 "mapping_note": holding.mapping_note,
                 "related_events": related_events,
@@ -1022,20 +1558,150 @@ def build_portfolio_event_impact_status(
     }
 
 
-def event_match_reasons(event: CalendarEvent, symbols: set[str], exchanges: set[str]) -> list[str]:
+def holding_event_impact(
+    event: CalendarEvent,
+    holding: PortfolioHolding,
+    symbols: set[str],
+    exchanges: set[str],
+) -> tuple[int, list[str]]:
+    reasons = event_match_reasons(event, symbols, exchanges, set(holding.themes))
+    score = 0
+    if any(reason.startswith("direct_earnings") for reason in reasons):
+        score = max(score, 100)
+    if any(reason.startswith("exchange_holiday") for reason in reasons):
+        score = max(score, 80)
+    if any(reason.startswith("direct_symbol") for reason in reasons):
+        score = max(score, 70)
+    for reason in reasons:
+        if reason.startswith("macro_theme:"):
+            try:
+                score = max(score, int(reason.rsplit(":", 1)[1]))
+            except ValueError:
+                score = max(score, 50)
+        elif reason == "macro_general_exposure":
+            score = max(score, 40)
+    return score, reasons
+
+
+def event_match_reasons(
+    event: CalendarEvent,
+    symbols: set[str],
+    exchanges: set[str],
+    themes: set[str] | None = None,
+) -> list[str]:
     text = f"{event.title}\n{event.description}".upper()
+    normalized_themes = set(themes or ())
     reasons: list[str] = []
     for symbol in sorted(symbols):
         if symbol and symbol.upper() in text:
-            reasons.append(f"symbol:{symbol}")
+            if event.uid.startswith("earnings-"):
+                reasons.append(f"direct_earnings:{symbol}")
+            else:
+                reasons.append(f"direct_symbol:{symbol}")
     if event.uid.startswith("holiday-"):
         for exchange in sorted(exchanges):
             if exchange in text:
                 reasons.append(f"exchange_holiday:{exchange}")
-    if event.uid.startswith("economic-") and any(exchange in {"NASDAQ", "NYSE", "KRX", "HKEX"} for exchange in exchanges):
-        if any(keyword in text for keyword in ("半导体", "科技", "美股", "成长股", "银行股", "风险偏好")):
-            reasons.append("macro_exposure")
+    if event.uid.startswith("economic-"):
+        category = event_uid_category(event.uid, "economic")
+        for theme_group, score, reason in MACRO_THEME_IMPACT_RULES.get(category, ()):
+            if normalized_themes & theme_group:
+                reasons.append(f"macro_theme:{reason}:{score}")
+        if any(exchange in SUPPORTED_EXCHANGES for exchange in exchanges):
+            if any(keyword in text for keyword in ("半导体", "科技", "美股", "成长股", "银行股", "风险偏好", "利率")):
+                reasons.append("macro_general_exposure")
     return sorted(set(reasons))
+
+
+def event_uid_category(uid: str, prefix: str) -> str:
+    trimmed = uid.removeprefix(f"{prefix}-")
+    if "-" not in trimmed:
+        return trimmed
+    parts = trimmed.split("-")
+    if len(parts) >= 2 and f"{parts[0]}_{parts[1]}" in {str(rule["category"]) for rule in ECONOMIC_EVENT_RULES}:
+        return f"{parts[0]}_{parts[1]}"
+    return parts[0]
+
+
+def portfolio_event_impact_score(event: CalendarEvent, portfolio_context: PortfolioContext | None) -> int:
+    if portfolio_context is None or not portfolio_context.enabled:
+        return 0
+    best_score = 0
+    total_market_value = portfolio_total_market_value(portfolio_context.holdings)
+    for holding in portfolio_context.holdings:
+        exchanges = infer_exchanges_for_holding(holding, {})
+        symbols_to_match = {holding.symbol}
+        if holding.canonical_symbol:
+            symbols_to_match.add(holding.canonical_symbol)
+        score, _ = holding_event_impact(event, holding, symbols_to_match, exchanges)
+        best_score = max(best_score, weighted_impact_score(score, holding, total_market_value))
+    return best_score
+
+
+def prioritized_event_sort_key(event: CalendarEvent, portfolio_context: PortfolioContext | None) -> tuple[dt.datetime, int, str]:
+    return (event_sort_key(event), -portfolio_event_impact_score(event, portfolio_context), event.title)
+
+
+def weighted_impact_score(base_score: int, holding: PortfolioHolding, total_market_value: float) -> int:
+    if base_score <= 0:
+        return 0
+    weight = holding_weight(holding, total_market_value)
+    if weight is None:
+        return base_score
+    bonus = min(30, round(weight * 100))
+    return base_score + bonus
+
+
+def filter_ics_events(
+    events: list[CalendarEvent],
+    portfolio_context: PortfolioContext | None,
+    *,
+    min_impact_score: int,
+    include_official_earnings: bool,
+) -> list[CalendarEvent]:
+    if min_impact_score <= 0:
+        return events
+    filtered: list[CalendarEvent] = []
+    for event in events:
+        impact_score = portfolio_event_impact_score(event, portfolio_context)
+        if impact_score >= min_impact_score:
+            filtered.append(event)
+            continue
+        if include_official_earnings and event.category == "earnings" and event.confidence == "official_confirmed":
+            filtered.append(event)
+    return filtered
+
+
+def dedupe_earnings_rows(rows: list[dict[str, Any]], watch_symbols: list[WatchSymbol], default_timezone: str) -> list[dict[str, Any]]:
+    watch_lookup = build_watch_symbol_lookup(watch_symbols)
+    selected: dict[tuple[str, dt.date], dict[str, Any]] = {}
+    for row in rows:
+        source_symbol = str(row.get("symbol", "")).strip().upper()
+        watch_item = watch_lookup.get(source_symbol)
+        if watch_item is None:
+            continue
+        event_date, _ = parse_earnings_datetime(row, earnings_timezone(watch_item, default_timezone))
+        if event_date is None:
+            continue
+        key = (watch_item.symbol, event_date)
+        existing = selected.get(key)
+        if existing is None or earnings_row_rank(row) > earnings_row_rank(existing):
+            selected[key] = row
+    return list(selected.values())
+
+
+def earnings_row_rank(row: dict[str, Any]) -> tuple[int, int, int]:
+    confidence_order = {
+        "official_confirmed": 4,
+        "provider_confirmed": 3,
+        "fallback_snapshot": 2,
+        "rule_estimated": 1,
+        "low_confidence": 0,
+    }
+    confidence_score = confidence_order.get(earnings_row_confidence(row), 0)
+    precise_score = 1 if parse_explicit_time(row) is not None or parse_plain_time(row.get("releaseTime")) is not None else 0
+    session_score = 1 if detect_session(row) != "unknown" else 0
+    return confidence_score, precise_score, session_score
 
 
 def warn_runtime(warnings: list[str] | None, message: str) -> None:
@@ -1103,6 +1769,8 @@ def load_watchlist(path: Path) -> list[WatchSymbol]:
                 timezone=as_optional_str(item.get("timezone")),
                 ir_url=as_optional_str(item.get("ir_url")),
                 ir_press_releases_rss=as_optional_str(item.get("ir_press_releases_rss")),
+                preferred_ir_url_patterns=parse_string_tuple(item.get("preferred_ir_url_patterns")),
+                skip_ir_url_patterns=parse_string_tuple(item.get("skip_ir_url_patterns")),
             )
         )
 
@@ -1132,6 +1800,16 @@ def parse_earnings_symbols(item: dict[str, Any], symbol: str) -> tuple[str, ...]
             seen.add(cleaned)
             normalized.append(cleaned)
     return tuple(normalized)
+
+
+def parse_string_tuple(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value.strip(),) if value.strip() else ()
+    if isinstance(value, list):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    return (str(value).strip(),) if str(value).strip() else ()
 
 
 def collect_earnings_symbols(watch_symbols: list[WatchSymbol]) -> list[str]:
@@ -1282,6 +1960,7 @@ def enrich_earnings_rows_with_official_ir(
         official = find_official_ir_earnings_info(watch_item, event_date)
         if official:
             updated.update(official)
+            updated["confidence"] = "official_confirmed"
         enriched.append(updated)
     return enriched
 
@@ -1318,51 +1997,253 @@ def load_official_ir_fallback_rows(
     start_date: dt.date,
     end_date: dt.date,
     default_timezone: str,
+    cache_path: Path | None = None,
+    cache_ttl_hours: int = 18,
+    max_urls_per_symbol: int = 4,
+    timeout_seconds: float = 6,
+    max_elapsed_seconds: float = 45,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    cache = load_official_ir_cache(cache_path)
+    cache_changed = False
+    scan_items: list[WatchSymbol] = []
     for item in watch_symbols:
         if not should_use_official_ir_fallback(item):
             continue
-        for url in official_ir_fallback_urls(item):
-            try:
-                page_text = html_to_text(fetch_text_url(url))
-            except Exception as exc:
-                print(f"WARNING: official IR fallback page failed for {item.symbol} {url}: {exc}", file=sys.stderr)
-                continue
-            for event_date in extract_candidate_earnings_dates(page_text, start_date, end_date):
-                parsed = parse_official_earnings_text(page_text, event_date)
-                if not parsed:
-                    continue
-                row: dict[str, Any] = {
-                    "symbol": item.symbol,
-                    "date": event_date.isoformat(),
-                    "companyName": item.name,
-                    "officialUrl": url,
-                    "url": url,
-                    "sessionSource": "Company official IR",
-                    "source": "Company official IR fallback",
-                }
-                row.update(parsed)
-                rows.append(row)
+        cached_rows = cached_official_ir_rows(cache, item.symbol, start_date, end_date, cache_ttl_hours)
+        if cached_rows is not None:
+            rows.extend(cached_rows)
+            continue
+        scan_items.append(item)
+    if scan_items:
+        scanned_by_symbol = scan_official_ir_rows_parallel(
+            scan_items,
+            start_date,
+            end_date,
+            max_urls_per_symbol=max_urls_per_symbol,
+            timeout_seconds=timeout_seconds,
+            max_elapsed_seconds=max_elapsed_seconds,
+        )
+        for item in scan_items:
+            scan_result = scanned_by_symbol.get(item.symbol, {"rows": [], "failures": [], "urls_scanned": []})
+            scanned_rows = list(scan_result.get("rows", []))
+            cache.setdefault("symbols", {})[item.symbol] = {
+                "fetched_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                "rows": scanned_rows,
+                "urls_scanned": scan_result.get("urls_scanned", []),
+                "failures": scan_result.get("failures", []),
+                "truncated": bool(scan_result.get("truncated", False)),
+            }
+            cache_changed = True
+            rows.extend(scanned_rows)
+    if cache_changed:
+        save_official_ir_cache(cache_path, cache)
     return rows
 
 
 def should_use_official_ir_fallback(item: WatchSymbol) -> bool:
-    if not item.ir_url and not item.ir_press_releases_rss:
-        return False
-    return len(item.earnings_symbols or ()) > 1 or bool(item.earnings_timezone)
+    return bool(item.ir_url or item.ir_press_releases_rss)
 
 
-def official_ir_fallback_urls(item: WatchSymbol) -> list[str]:
+def scan_official_ir_fallback_rows(
+    item: WatchSymbol,
+    start_date: dt.date,
+    end_date: dt.date,
+    *,
+    max_urls_per_symbol: int,
+    timeout_seconds: float,
+) -> list[dict[str, Any]]:
+    return list(
+        scan_official_ir_fallback_result(
+            item,
+            start_date,
+            end_date,
+            max_urls_per_symbol=max_urls_per_symbol,
+            timeout_seconds=timeout_seconds,
+        )["rows"]
+    )
+
+
+def scan_official_ir_fallback_result(
+    item: WatchSymbol,
+    start_date: dt.date,
+    end_date: dt.date,
+    *,
+    max_urls_per_symbol: int,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    all_urls = official_ir_fallback_urls(item, timeout_seconds=timeout_seconds)
+    urls = all_urls[:max_urls_per_symbol]
+    for url in urls:
+        try:
+            page_text = html_to_text(fetch_text_url(url, timeout_seconds=timeout_seconds))
+        except Exception as exc:
+            print(f"WARNING: official IR fallback page failed for {item.symbol} {url}: {exc}", file=sys.stderr)
+            failures.append({"url": url, "error": str(exc)[:240]})
+            continue
+        for event_date in extract_candidate_earnings_dates(page_text, start_date, end_date + dt.timedelta(days=14)):
+            parsed = parse_official_earnings_text(page_text, event_date)
+            if not parsed:
+                continue
+            row: dict[str, Any] = {
+                "symbol": item.symbol,
+                "date": event_date.isoformat(),
+                "companyName": item.name,
+                "officialUrl": url,
+                "url": url,
+                "sessionSource": "Company official IR",
+                "source": "Company official IR fallback",
+                "confidence": "official_confirmed",
+            }
+            row.update(parsed)
+            rows.append(row)
+    return {
+        "rows": rows,
+        "urls_scanned": urls,
+        "failures": failures,
+        "truncated": len(all_urls) > len(urls),
+    }
+
+
+def scan_official_ir_rows_parallel(
+    items: list[WatchSymbol],
+    start_date: dt.date,
+    end_date: dt.date,
+    *,
+    max_urls_per_symbol: int,
+    timeout_seconds: float,
+    max_elapsed_seconds: float,
+) -> dict[str, dict[str, Any]]:
+    max_workers = min(8, max(1, len(items)))
+    results: dict[str, dict[str, Any]] = {}
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        futures = {
+            executor.submit(
+                scan_official_ir_fallback_result,
+                item,
+                start_date,
+                end_date,
+                max_urls_per_symbol=max_urls_per_symbol,
+                timeout_seconds=timeout_seconds,
+            ): item
+            for item in items
+        }
+        deadline = time.monotonic() + max_elapsed_seconds
+        for future in concurrent.futures.as_completed(futures, timeout=max_elapsed_seconds):
+            item = futures[future]
+            try:
+                results[item.symbol] = future.result()
+            except Exception as exc:
+                print(f"WARNING: official IR fallback scan failed for {item.symbol}: {exc}", file=sys.stderr)
+                results[item.symbol] = {"rows": [], "urls_scanned": [], "failures": [{"url": "", "error": str(exc)[:240]}]}
+            if time.monotonic() >= deadline:
+                break
+    except concurrent.futures.TimeoutError:
+        pass
+    finally:
+        for item in items:
+            results.setdefault(
+                item.symbol,
+                {
+                    "rows": [],
+                    "urls_scanned": [],
+                    "failures": [{"url": "", "error": "stage_timeout"}],
+                    "truncated": True,
+                },
+            )
+        executor.shutdown(wait=False, cancel_futures=True)
+    return results
+
+
+def load_official_ir_cache(cache_path: Path | None) -> dict[str, Any]:
+    if cache_path is None or not cache_path.exists():
+        return {"version": 1, "symbols": {}}
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"version": 1, "symbols": {}}
+    if not isinstance(data, dict):
+        return {"version": 1, "symbols": {}}
+    data.setdefault("version", 1)
+    data.setdefault("symbols", {})
+    return data
+
+
+def save_official_ir_cache(cache_path: Path | None, cache: dict[str, Any]) -> None:
+    if cache_path is None:
+        return
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def cached_official_ir_rows(
+    cache: dict[str, Any],
+    symbol: str,
+    start_date: dt.date,
+    end_date: dt.date,
+    ttl_hours: int,
+) -> list[dict[str, Any]] | None:
+    entry = cache.get("symbols", {}).get(symbol)
+    if not isinstance(entry, dict):
+        return None
+    fetched_at_raw = as_optional_str(entry.get("fetched_at_utc"))
+    if not fetched_at_raw:
+        return None
+    try:
+        fetched_at = dt.datetime.fromisoformat(fetched_at_raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if fetched_at.tzinfo is None:
+        fetched_at = fetched_at.replace(tzinfo=dt.timezone.utc)
+    if dt.datetime.now(dt.timezone.utc) - fetched_at.astimezone(dt.timezone.utc) > dt.timedelta(hours=ttl_hours):
+        return None
+    rows = entry.get("rows", [])
+    if not isinstance(rows, list):
+        return None
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        event_date = coerce_date(row.get("date"))
+        if event_date and start_date <= event_date <= end_date:
+            filtered.append(dict(row))
+    return filtered
+
+
+def official_ir_fallback_urls(item: WatchSymbol, timeout_seconds: float = 30) -> list[str]:
     urls: list[str] = []
     if item.ir_url:
         urls.append(item.ir_url)
     if item.ir_press_releases_rss:
         try:
-            urls.extend(load_ir_press_release_links(item.ir_press_releases_rss)[:10])
+            urls.extend(load_ir_press_release_links(item.ir_press_releases_rss, timeout_seconds=timeout_seconds)[:10])
         except Exception as exc:
             print(f"WARNING: official IR fallback RSS failed for {item.symbol}: {exc}", file=sys.stderr)
-    return dedupe_urls(urls)
+    urls = dedupe_urls(urls)
+    if item.preferred_ir_url_patterns:
+        preferred = [url for url in urls if url_matches_patterns(url, item.preferred_ir_url_patterns)]
+        others = [url for url in urls if url not in preferred]
+        urls = [*preferred, *others]
+    if item.skip_ir_url_patterns:
+        urls = [url for url in urls if not url_matches_patterns(url, item.skip_ir_url_patterns)]
+    return urls
+
+
+def url_matches_patterns(url: str, patterns: tuple[str, ...]) -> bool:
+    normalized = url.lower()
+    for pattern in patterns:
+        if not pattern:
+            continue
+        try:
+            if re.search(pattern, url, flags=re.IGNORECASE):
+                return True
+        except re.error:
+            if pattern.lower() in normalized:
+                return True
+    return False
 
 
 def merge_missing_official_ir_rows(
@@ -1411,12 +2292,13 @@ def parse_official_ir_page(url: str, event_date: dt.date, symbol: str) -> dict[s
         parsed["officialUrl"] = url
         parsed["url"] = url
         parsed["sessionSource"] = "Company official IR"
+        parsed["confidence"] = "official_confirmed"
         return parsed
     return None
 
 
-def load_ir_press_release_links(rss_url: str) -> list[str]:
-    xml_text = fetch_text_url(rss_url)
+def load_ir_press_release_links(rss_url: str, timeout_seconds: float = 30) -> list[str]:
+    xml_text = fetch_text_url(rss_url, timeout_seconds=timeout_seconds)
     root = ET.fromstring(xml_text)
     links: list[str] = []
     for item in root.findall(".//item"):
@@ -1463,7 +2345,7 @@ def dedupe_urls(urls: list[str]) -> list[str]:
     return deduped
 
 
-def fetch_text_url(url: str) -> str:
+def fetch_text_url(url: str, timeout_seconds: float = 30) -> str:
     request = urllib.request.Request(
         url,
         headers={
@@ -1471,7 +2353,7 @@ def fetch_text_url(url: str) -> str:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
         return response.read().decode("utf-8", errors="replace")
 
 
@@ -1542,7 +2424,8 @@ def parse_official_earnings_text(text: str, event_date: dt.date) -> dict[str, An
     lowered = relevant_text.lower()
     if "financial results" not in lowered and "earnings" not in lowered:
         return None
-    official_time = extract_official_earnings_time(relevant_text)
+    official_times = extract_official_earnings_times(relevant_text)
+    official_time = official_times.get("conference_call_time") or official_times.get("release_time")
     session = "unknown"
     if "after the market close" in lowered or "after market close" in lowered:
         session = "after"
@@ -1561,6 +2444,10 @@ def parse_official_earnings_text(text: str, event_date: dt.date) -> dict[str, An
         result["time"] = "16:05"
     elif session == "before":
         result["time"] = "08:00"
+    if official_times.get("release_time"):
+        result["releaseTime"] = official_times["release_time"].strftime("%H:%M")
+    if official_times.get("conference_call_time"):
+        result["conferenceCallTime"] = official_times["conference_call_time"].strftime("%H:%M")
     if session != "unknown":
         result["session"] = session
     return result
@@ -1675,22 +2562,40 @@ def event_date_patterns(text: str, event_date: dt.date) -> tuple[str, ...]:
 
 
 def extract_official_earnings_time(text: str) -> dt.time | None:
+    times = extract_official_earnings_times(text)
+    return times.get("conference_call_time") or times.get("release_time")
+
+
+def extract_official_earnings_times(text: str) -> dict[str, dt.time]:
+    result: dict[str, dt.time] = {}
     priority_windows: list[tuple[str, bool]] = []
     lowered = text.lower()
     for keyword in ("conference call", "webcast", "management will conduct", "discuss these results"):
         index = lowered.find(keyword)
         if index >= 0:
             priority_windows.append((text[max(0, index - 120) : index + 420], True))
+            parsed = find_time_with_timezone(text[max(0, index - 120) : index + 420], preferred_zones=("et", "edt", "est"), prefer_last=True)
+            if parsed:
+                result["conference_call_time"] = parsed
+                break
     for keyword in ("earnings release", "financial results", "will announce", "announced", "reported results"):
         index = lowered.find(keyword)
         if index >= 0:
             priority_windows.append((text[max(0, index - 120) : index + 420], False))
+            parsed = find_time_with_timezone(text[max(0, index - 120) : index + 420], preferred_zones=("et", "edt", "est"), prefer_last=False)
+            if parsed:
+                result["release_time"] = parsed
+                break
     priority_windows.append((text, False))
+    if result:
+        return result
     for window, prefer_last in priority_windows:
         parsed = find_time_with_timezone(window, preferred_zones=("et", "edt", "est"), prefer_last=prefer_last)
         if parsed:
-            return parsed
-    return None
+            key = "conference_call_time" if prefer_last else "release_time"
+            result[key] = parsed
+            return result
+    return result
 
 
 def find_time_with_timezone(text: str, preferred_zones: tuple[str, ...], prefer_last: bool = False) -> dt.time | None:
@@ -1748,6 +2653,8 @@ def build_earnings_events(
     reminder_days: int,
     timed_event_minutes: int,
     links_config: dict[str, Any],
+    include_observation_events: bool = False,
+    compact_titles: bool = False,
 ) -> list[CalendarEvent]:
     watch_by_symbol = build_watch_symbol_lookup(watch_symbols)
     events: list[CalendarEvent] = []
@@ -1770,9 +2677,12 @@ def build_earnings_events(
         session_label = session_label_cn(session)
         company_name = get_company_name(row, watch_item)
         title_name = f"{company_name} ({display_symbol})" if company_name else display_symbol
-        title = f"{title_name} 财报 - {session_label}"
+        compact_title_name = display_symbol if compact_titles else title_name
+        title = f"{compact_title_name} 财报 - {session_label}"
 
-        effective_time = precise_time or default_time_for_session(session)
+        conference_call_time = parse_plain_time(row.get("conferenceCallTime"))
+        release_time = parse_plain_time(row.get("releaseTime"))
+        effective_time = release_time or (None if conference_call_time else precise_time) or default_time_for_session(session)
         if effective_time is None:
             start: dt.date | dt.datetime = event_date
             end: dt.date | dt.datetime = event_date + dt.timedelta(days=1)
@@ -1791,8 +2701,9 @@ def build_earnings_events(
             event_timezone=event_timezone,
             links_config=links_config,
             used_default_session_time=precise_time is None and effective_time is not None,
-            used_precise_time=precise_time is not None,
+            used_precise_time=precise_time is not None or release_time is not None,
         )
+        row_confidence = earnings_row_confidence(row)
         events.append(
             CalendarEvent(
                 uid=make_uid("earnings", display_symbol, event_date.isoformat(), session_label),
@@ -1804,10 +2715,140 @@ def build_earnings_events(
                 description=description,
                 url=primary_url,
                 reminder_days_before=reminder_days,
+                category="earnings",
+                confidence=row_confidence,
             )
         )
+        if conference_call_time:
+            call_start = dt.datetime.combine(event_date, conference_call_time, tzinfo=ZoneInfo(event_timezone))
+            call_description = "\n".join(
+                [
+                    f"Ticker: {display_symbol}",
+                    f"事件: {title_name} 财报电话会 / webcast",
+                    f"交易所时区: {event_timezone}",
+                    f"官方财报页面: {as_optional_str(row.get('officialUrl')) or ''}",
+                    f"TradingView: {tradingview_link(watch_item, display_symbol)}",
+                    "说明: 电话会通常用于管理层解读财报、指引和问答，盘后/盘前价格反应可能在问答环节继续变化。",
+                ]
+            )
+            events.append(
+                CalendarEvent(
+                    uid=make_uid("earnings-call", display_symbol, event_date.isoformat(), conference_call_time.strftime("%H:%M")),
+                    title=f"{compact_title_name} 财报电话会",
+                    start=call_start,
+                    end=call_start + dt.timedelta(minutes=timed_event_minutes),
+                    all_day=False,
+                    timezone=event_timezone,
+                    description=call_description,
+                    url=as_optional_str(row.get("officialUrl")) or primary_url,
+                    reminder_days_before=reminder_days,
+                    category="earnings",
+                    confidence=row_confidence,
+                )
+            )
+        if include_observation_events:
+            observation = build_earnings_observation_event(
+                display_symbol=display_symbol,
+                title_name=title_name,
+                compact_title_name=compact_title_name,
+                event_date=event_date,
+                session=session,
+                event_timezone=event_timezone,
+                primary_url=primary_url,
+                timed_event_minutes=timed_event_minutes,
+            )
+            if observation:
+                events.append(observation)
 
     return events
+
+
+def earnings_row_confidence(row: dict[str, Any]) -> str:
+    explicit = as_optional_str(row.get("confidence"))
+    if explicit:
+        return explicit
+    if as_optional_str(row.get("officialUrl")) or as_optional_str(row.get("timePrecision")) == "Company official IR":
+        return "official_confirmed"
+    if as_optional_str(row.get("source")) == "Company official IR fallback":
+        return "official_confirmed"
+    if detect_session(row) == "unknown" and parse_explicit_time(row) is None:
+        return "low_confidence"
+    return "provider_confirmed"
+
+
+def build_earnings_observation_event(
+    *,
+    display_symbol: str,
+    title_name: str,
+    compact_title_name: str,
+    event_date: dt.date,
+    session: str,
+    event_timezone: str,
+    primary_url: str | None,
+    timed_event_minutes: int,
+) -> CalendarEvent | None:
+    if session == "unknown":
+        return None
+    observation_seed = event_date + dt.timedelta(days=1) if session == "after" else event_date
+    observation_date = next_trading_day(observation_seed, event_timezone)
+    start = dt.datetime.combine(observation_date, dt.time(9, 30), tzinfo=ZoneInfo(event_timezone))
+    return CalendarEvent(
+        uid=make_uid("earnings-observation", display_symbol, event_date.isoformat(), session),
+        title=f"{compact_title_name} 财报后观察",
+        start=start,
+        end=start + dt.timedelta(minutes=max(30, timed_event_minutes)),
+        all_day=False,
+        timezone=event_timezone,
+        description="\n".join(
+            [
+                f"Ticker: {display_symbol}",
+                "事件: 财报结果后首个常规交易观察窗口",
+                "影响对象: 个股、同行、供应链、期权波动率和相关 ETF",
+                "影响逻辑: 如果财报、指引或电话会问答超预期，首个常规交易时段可能延续重定价；如果盘前/盘后反应过度，也可能出现回补或反转。",
+                "说明: 该事件为规则化观察窗口，不代表官方公告时间。",
+            ]
+        ),
+        url=primary_url,
+        reminder_days_before=None,
+        category="earnings",
+        confidence="rule_estimated",
+    )
+
+
+def next_trading_day(start_date: dt.date, timezone: str) -> dt.date:
+    exchange = exchange_for_timezone(timezone)
+    day = start_date
+    for _ in range(14):
+        if is_trading_day(day, exchange):
+            return day
+        day += dt.timedelta(days=1)
+    return start_date
+
+
+def exchange_for_timezone(timezone: str) -> str:
+    return {
+        "America/New_York": "NYSE",
+        "Asia/Seoul": "KRX",
+        "Asia/Hong_Kong": "HKEX",
+        "Asia/Tokyo": "TSE",
+        "Asia/Taipei": "TWSE",
+        "Europe/London": "LSE",
+        "Europe/Paris": "EURONEXT",
+    }.get(timezone, "NYSE")
+
+
+def is_trading_day(day: dt.date, exchange: str) -> bool:
+    if day.weekday() >= 5:
+        return False
+    if exchange in {"NYSE", "NASDAQ"}:
+        return day not in {event_date for event_date, _ in us_market_holidays(day.year)}
+    if exchange == "KRX":
+        return day not in {event_date for event_date, _ in krx_market_holidays(day.year)}
+    if exchange == "HKEX":
+        return day not in {event_date for event_date, _ in hkex_market_holidays(day.year)}
+    if exchange in GENERIC_EXCHANGE_HOLIDAY_RULES:
+        return day not in {event_date for event_date, _ in generic_exchange_holidays(exchange, day.year)}
+    return True
 
 
 def earnings_timezone(watch_item: WatchSymbol, default_timezone: str) -> str:
@@ -2284,6 +3325,9 @@ def load_official_scheduled_macro_events(
                 reference_period=as_optional_str(row.get("reference_period")),
                 source_name=as_optional_str(row.get("source_name")),
                 source_url=as_optional_str(row.get("source_url")),
+                previous=row.get("previous"),
+                estimate=row.get("estimate") or row.get("consensus") or row.get("forecast"),
+                actual=row.get("actual"),
             )
         )
 
@@ -2440,6 +3484,9 @@ def build_free_macro_event(
     reference_period: str | None = None,
     source_name: str | None = None,
     source_url: str | None = None,
+    previous: Any = None,
+    estimate: Any = None,
+    actual: Any = None,
 ) -> CalendarEvent:
     rule = rule_by_category(category)
     if rule is None:
@@ -2454,6 +3501,9 @@ def build_free_macro_event(
         reference_period=reference_period,
         source_name=source_name,
         source_url=source_url,
+        previous=previous,
+        estimate=estimate,
+        actual=actual,
     )
     title = f"{rule['title']} - {rule['importance']}影响"
     if estimated:
@@ -2468,6 +3518,8 @@ def build_free_macro_event(
         description=description,
         url=source_url or official_url_for_category(category),
         reminder_days_before=reminder_days,
+        category="macro",
+        confidence=macro_event_confidence(estimated=estimated, source_name=source_name),
     )
 
 
@@ -2479,12 +3531,17 @@ def build_free_macro_description(
     reference_period: str | None = None,
     source_name: str | None = None,
     source_url: str | None = None,
+    previous: Any = None,
+    estimate: Any = None,
+    actual: Any = None,
 ) -> str:
     category = str(rule["category"])
     source_note = source_name or (
         "Federal Reserve official FOMC calendar" if category.startswith("fomc") else "Free scheduled release rule with official source URL"
     )
     official_url = source_url or official_url_for_category(category)
+    expected_direction = describe_expected_direction(previous, estimate)
+    surprise = describe_surprise(actual, estimate)
     lines = [
         f"分类: {rule['title']}",
         f"官方发布项: {release_name}" if release_name else "",
@@ -2497,10 +3554,11 @@ def build_free_macro_description(
         str(rule["impact_objects"]),
         "",
         "本次关注:",
-        "上次: 暂无数据",
-        "市场预期: 暂无数据",
-        "实际: 暂无数据",
-        "预计方向: 暂无一致预期或缺少可比上次值",
+        f"上次: {format_value(previous)}",
+        f"市场预期: {format_value(estimate)}",
+        f"实际: {format_value(actual)}",
+        f"预计方向: {expected_direction}",
+        f"意外程度: {surprise}",
         "",
         "影响逻辑:",
         f"如果高于预期: {rule['higher']}",
@@ -2516,6 +3574,15 @@ def build_free_macro_description(
         f"数据来源: {source_note}",
     ]
     return "\n".join(line for line in lines if line != "")
+
+
+def macro_event_confidence(*, estimated: bool, source_name: str | None) -> str:
+    if estimated:
+        return "rule_estimated"
+    normalized = str(source_name or "").lower()
+    if "snapshot" in normalized or "fallback" in normalized or "local" in normalized:
+        return "fallback_snapshot"
+    return "official_confirmed"
 
 
 def load_json_url(url: str) -> Any:
@@ -2584,6 +3651,8 @@ def build_economic_events(
                 description=description,
                 url=official_url_for_category(str(rule["category"])),
                 reminder_days_before=reminder_days,
+                category="macro",
+                confidence="provider_confirmed",
             )
         )
     return sorted(events, key=event_sort_key)
@@ -2788,6 +3857,19 @@ def describe_expected_direction(previous: Any, estimate: Any) -> str:
     return "预计持平"
 
 
+def describe_surprise(actual: Any, estimate: Any) -> str:
+    actual_number = parse_number(actual)
+    estimate_number = parse_number(estimate)
+    if actual_number is None or estimate_number is None:
+        return "暂无实际值或一致预期"
+    delta = actual_number - estimate_number
+    if delta > 0:
+        return f"高于预期 {format_decimal(delta)}"
+    if delta < 0:
+        return f"低于预期 {format_decimal(abs(delta))}"
+    return "符合预期"
+
+
 def parse_number(value: Any) -> float | None:
     if value in (None, ""):
         return None
@@ -2864,6 +3946,8 @@ def load_fmp_market_holiday_events(
                     description=description,
                     url=official_url,
                     reminder_days_before=reminder_days,
+                    category="holiday",
+                    confidence="provider_confirmed",
                 )
             )
     return events
@@ -2887,7 +3971,95 @@ def build_calculated_market_holiday_events(
         events.extend(build_krx_market_holiday_events(start_date, end_date, reminder_days))
     if "HKEX" in normalized_exchanges:
         events.extend(build_hkex_market_holiday_events(start_date, end_date, reminder_days))
+    for exchange in normalized_exchanges:
+        if exchange in GENERIC_EXCHANGE_HOLIDAY_RULES:
+            events.extend(build_generic_exchange_market_holiday_events(exchange, start_date, end_date, reminder_days))
     return events
+
+
+def build_generic_exchange_market_holiday_events(
+    exchange: str,
+    start_date: dt.date,
+    end_date: dt.date,
+    reminder_days: int,
+) -> list[CalendarEvent]:
+    rule = GENERIC_EXCHANGE_HOLIDAY_RULES[exchange]
+    official_url = EXCHANGE_HOLIDAY_URLS[exchange]
+    timezone = str(rule["timezone"])
+    events: list[CalendarEvent] = []
+    for year in range(start_date.year, end_date.year + 1):
+        for event_date, name in generic_exchange_holidays(exchange, year):
+            if event_date < start_date or event_date > end_date:
+                continue
+            description = "\n".join(
+                [
+                    f"事件: {rule['event_label']}",
+                    f"交易所: {exchange}",
+                    f"名称: {name}",
+                    "重要性: 高",
+                    "",
+                    "影响对象:",
+                    str(rule["description"]),
+                    "",
+                    "影响逻辑:",
+                    "休市期间本地现货交易暂停；如果前后有财报、宏观数据或跨市场重大事件，相关 ADR、ETF 和跨市场持仓可能在下一交易日集中反应。",
+                    "",
+                    f"官方页面: {official_url}",
+                    "数据来源: Calculated public-holiday rules with official exchange link",
+                ]
+            )
+            events.append(
+                CalendarEvent(
+                    uid=make_uid("holiday", exchange.lower(), str(name), event_date.isoformat()),
+                    title=f"{rule['title_prefix']} - {name}",
+                    start=event_date,
+                    end=event_date + dt.timedelta(days=1),
+                    all_day=True,
+                    timezone=timezone,
+                    description=description,
+                    url=official_url,
+                    reminder_days_before=reminder_days,
+                    category="holiday",
+                    confidence="rule_estimated",
+                )
+            )
+    return events
+
+
+def generic_exchange_holidays(exchange: str, year: int) -> list[tuple[dt.date, str]]:
+    try:
+        import holidays as holidays_lib
+    except ImportError:
+        return fallback_generic_exchange_holidays(exchange, year)
+    rule = GENERIC_EXCHANGE_HOLIDAY_RULES[exchange]
+    country_holidays = holidays_lib.country_holidays(str(rule["country"]), years=[year], language="en_US")
+    holidays_by_date: dict[dt.date, str] = {
+        event_date: str(name)
+        for event_date, name in country_holidays.items()
+        if event_date.weekday() < 5
+    }
+    if not holidays_by_date:
+        return fallback_generic_exchange_holidays(exchange, year)
+    if exchange in {"LSE", "EURONEXT"}:
+        for event_date, name in ((easter_sunday(year) - dt.timedelta(days=2), "Good Friday"), (easter_sunday(year) + dt.timedelta(days=1), "Easter Monday")):
+            if event_date.weekday() < 5:
+                holidays_by_date[event_date] = name
+    return sorted(holidays_by_date.items(), key=lambda item: item[0])
+
+
+def fallback_generic_exchange_holidays(exchange: str, year: int) -> list[tuple[dt.date, str]]:
+    holidays_by_date: dict[dt.date, str] = {}
+    if exchange in {"TSE", "TWSE", "LSE", "EURONEXT"}:
+        new_year = observed_fixed_holiday(year, 1, 1)
+        if new_year.weekday() < 5:
+            holidays_by_date[new_year] = "New Year's Day"
+    if exchange in {"LSE", "EURONEXT"}:
+        holidays_by_date[easter_sunday(year) - dt.timedelta(days=2)] = "Good Friday"
+        holidays_by_date[easter_sunday(year) + dt.timedelta(days=1)] = "Easter Monday"
+        christmas = observed_fixed_holiday(year, 12, 25)
+        if christmas.weekday() < 5:
+            holidays_by_date[christmas] = "Christmas Day"
+    return sorted(holidays_by_date.items(), key=lambda item: item[0])
 
 
 def build_us_market_holiday_events(
@@ -2939,6 +4111,8 @@ def build_us_market_holiday_events(
                     description=description,
                     url=official_url,
                     reminder_days_before=reminder_days,
+                    category="holiday",
+                    confidence="rule_estimated",
                 )
             )
     return events
@@ -3005,6 +4179,8 @@ def build_krx_market_holiday_events(
                     description=description,
                     url=official_url,
                     reminder_days_before=reminder_days,
+                    category="holiday",
+                    confidence="rule_estimated",
                 )
             )
     return events
@@ -3125,6 +4301,8 @@ def build_hkex_market_holiday_events(
                     description=description,
                     url=official_url,
                     reminder_days_before=reminder_days,
+                    category="holiday",
+                    confidence="rule_estimated",
                 )
             )
     return events
@@ -3215,6 +4393,8 @@ def build_witching_events(
                     description=description,
                     url=WITCHING_OFFICIAL_URL,
                     reminder_days_before=reminder_days,
+                    category="other",
+                    confidence="rule_estimated",
                 )
             )
     return events
@@ -3299,6 +4479,8 @@ def build_manual_event(item: dict[str, Any], default_timezone: str, reminder_day
         description=description,
         url=url,
         reminder_days_before=reminder_days,
+        category="manual",
+        confidence="official_confirmed" if url else "user_configured",
     )
 
 
@@ -3386,6 +4568,166 @@ def render_ics(name: str, description: str, events: list[CalendarEvent]) -> str:
     return "\r\n".join(lines) + "\r\n"
 
 
+def render_dashboard_html(status_data: dict[str, Any], events: list[CalendarEvent]) -> str:
+    sections = [
+        ("概览", render_dashboard_overview(status_data)),
+        ("未来 7 天", render_dashboard_event_summary(status_data, days=7)),
+        ("未来 30 天", render_dashboard_event_summary(status_data, days=30)),
+        ("高影响事项", render_dashboard_high_impact(status_data)),
+        ("事件列表", render_dashboard_events(events)),
+        ("URL 校验", render_dashboard_url_validation(status_data.get("url_validation", {}))),
+        ("财报覆盖", render_dashboard_json_block(status_data.get("earnings_coverage", {}))),
+        ("影响分析", render_dashboard_json_block(status_data.get("portfolio_event_impact", {}))),
+        ("持仓主题", render_dashboard_json_block(status_data.get("portfolio_context", {}))),
+        ("宏观审计", render_dashboard_json_block(status_data.get("macro_audit", []))),
+    ]
+    body = "".join(
+        f"<section><h2>{html.escape(title)}</h2>{content}</section>" for title, content in sections
+    )
+    return (
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "<title>stocks-calendar dashboard</title>"
+        "<style>"
+        "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:24px;line-height:1.45;color:#111;}"
+        "h1,h2{margin:0 0 12px;}"
+        "section{margin:0 0 24px;padding:16px;border:1px solid #ddd;border-radius:8px;}"
+        "table{width:100%;border-collapse:collapse;}"
+        "th,td{border-top:1px solid #e5e5e5;padding:8px 6px;text-align:left;vertical-align:top;}"
+        ".tag{display:inline-block;padding:2px 6px;border:1px solid #ccc;border-radius:999px;font-size:12px;}"
+        ".score-high{color:#0a6b2b;font-weight:700;}.score-mid{color:#8a5a00;font-weight:700;}.fail{color:#a40000;font-weight:700;}"
+        "code,pre{background:#f6f8fa;border-radius:6px;}"
+        "pre{white-space:pre-wrap;word-break:break-word;padding:12px;}"
+        ".muted{color:#666;}"
+        "</style></head><body>"
+        "<h1>stocks-calendar</h1>"
+        f"<p class=\"muted\">生成时间: {html.escape(str(status_data.get('generated_at_utc', '')))}</p>"
+        f"{body}"
+        "</body></html>"
+    )
+
+
+def render_dashboard_overview(status_data: dict[str, Any]) -> str:
+    event_counts = status_data.get("event_counts", {})
+    warnings = status_data.get("warnings", [])
+    items = [
+        f"<li>监控股票: {html.escape(str(status_data.get('watchlist_count', 0)))}</li>",
+        f"<li>事件总数: {html.escape(str(event_counts.get('total', 0)))}</li>",
+        f"<li>写入 iOS 订阅: {html.escape(str(status_data.get('published_event_count', event_counts.get('total', 0))))}</li>",
+        f"<li>财报: {html.escape(str(event_counts.get('earnings', 0)))}</li>",
+        f"<li>宏观: {html.escape(str(event_counts.get('macro', 0)))}</li>",
+        f"<li>休市: {html.escape(str(event_counts.get('holiday', 0)))}</li>",
+        f"<li>提醒: {html.escape(str(event_counts.get('manual', 0)))}</li>",
+    ]
+    confidence_counts = status_data.get("confidence_counts", {})
+    if confidence_counts:
+        items.append(f"<li>可信度: {html.escape(', '.join(f'{key}={value}' for key, value in confidence_counts.items()))}</li>")
+    if warnings:
+        items.append(f"<li>警告: {html.escape(' | '.join(map(str, warnings)))}</li>")
+    return "<ul>" + "".join(items) + "</ul>"
+
+
+def render_dashboard_event_summary(status_data: dict[str, Any], days: int) -> str:
+    start_date = coerce_date(status_data.get("window", {}).get("start"))
+    if start_date is None:
+        return "<p class=\"muted\">缺少窗口开始日期。</p>"
+    end_date = start_date + dt.timedelta(days=days)
+    rows = []
+    for event in status_data.get("event_summary", []):
+        event_date = coerce_date(event.get("start"))
+        if event_date is None or event_date < start_date or event_date > end_date:
+            continue
+        rows.append(render_dashboard_summary_row(event))
+    if not rows:
+        return "<p class=\"muted\">没有事项。</p>"
+    return dashboard_summary_table(rows)
+
+
+def render_dashboard_high_impact(status_data: dict[str, Any]) -> str:
+    events = [
+        event
+        for event in status_data.get("event_summary", [])
+        if int(event.get("impact_score") or 0) >= 70 or event.get("confidence") == "official_confirmed"
+    ]
+    events.sort(key=lambda item: (-int(item.get("impact_score") or 0), str(item.get("start") or ""), str(item.get("title") or "")))
+    rows = [render_dashboard_summary_row(event) for event in events[:50]]
+    if not rows:
+        return "<p class=\"muted\">没有高影响事项。</p>"
+    return dashboard_summary_table(rows)
+
+
+def render_dashboard_summary_row(event: dict[str, Any]) -> str:
+    score = int(event.get("impact_score") or 0)
+    score_class = "score-high" if score >= 80 else "score-mid" if score >= 50 else ""
+    return (
+        "<tr>"
+        f"<td>{html.escape(str(event.get('start') or ''))}</td>"
+        f"<td>{html.escape(str(event.get('title') or ''))}</td>"
+        f"<td><span class=\"tag\">{html.escape(str(event.get('category') or ''))}</span></td>"
+        f"<td class=\"{score_class}\">{html.escape(str(score))}</td>"
+        f"<td>{html.escape(str(event.get('confidence') or ''))}</td>"
+        f"<td>{html.escape(str(event.get('url') or ''))}</td>"
+        "</tr>"
+    )
+
+
+def dashboard_summary_table(rows: list[str]) -> str:
+    header = "<tr><th>时间</th><th>标题</th><th>分类</th><th>影响分</th><th>可信度</th><th>URL</th></tr>"
+    return "<table>" + header + "".join(rows) + "</table>"
+
+
+def render_dashboard_url_validation(value: Any) -> str:
+    if not isinstance(value, dict) or not value.get("enabled", False):
+        return "<p class=\"muted\">URL 校验未启用。</p>"
+    failures = value.get("failures", [])
+    summary = (
+        f"<p>已检查 {html.escape(str(value.get('checked', 0)))} 个 URL；"
+        f"失败 {html.escape(str(len(failures) if isinstance(failures, list) else 0))} 个；"
+        f"截断: {html.escape(str(bool(value.get('truncated', False))))}</p>"
+    )
+    if not failures:
+        return summary
+    rows = []
+    for item in failures[:50]:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(item.get('role') or ''))}</td>"
+            f"<td>{html.escape(str(item.get('event_title') or ''))}</td>"
+            f"<td>{html.escape(str(item.get('status') or ''))}</td>"
+            f"<td>{html.escape(str(item.get('url') or ''))}</td>"
+            "</tr>"
+        )
+    return summary + "<table><tr><th>角色</th><th>事件</th><th>状态</th><th>URL</th></tr>" + "".join(rows) + "</table>"
+
+
+def render_dashboard_events(events: list[CalendarEvent]) -> str:
+    rows = []
+    for event in events[:200]:
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(event_start_display(event))}</td>"
+            f"<td>{html.escape(event.title)}</td>"
+            f"<td>{html.escape(event.timezone)}</td>"
+            f"<td>{html.escape('全天' if event.all_day else '定时')}</td>"
+            f"<td>{html.escape(event.url or '')}</td>"
+            "</tr>"
+        )
+    header = "<tr><th>时间</th><th>标题</th><th>时区</th><th>类型</th><th>URL</th></tr>"
+    return "<table>" + header + "".join(rows) + "</table>"
+
+
+def render_dashboard_json_block(value: Any) -> str:
+    return f"<pre>{html.escape(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))}</pre>"
+
+
+def event_start_display(event: CalendarEvent) -> str:
+    if isinstance(event.start, dt.datetime):
+        return event.start.isoformat()
+    return event.start.isoformat()
+
+
 def event_sort_key(event: CalendarEvent) -> dt.datetime:
     if isinstance(event.start, dt.datetime):
         start = event.start
@@ -3398,12 +4740,19 @@ def event_sort_key(event: CalendarEvent) -> dt.datetime:
 
 def render_event(event: CalendarEvent) -> list[str]:
     now = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    description = "\n".join(
+        [
+            event.description,
+            f"事件分类: {event_category(event)}",
+            f"可信度: {event.confidence}",
+        ]
+    )
     lines = [
         "BEGIN:VEVENT",
         f"UID:{escape_text(event.uid)}@stocks-calendar",
         f"DTSTAMP:{now}",
         f"SUMMARY:{escape_text(event.title)}",
-        f"DESCRIPTION:{escape_text(event.description)}",
+        f"DESCRIPTION:{escape_text(description)}",
     ]
     if event.url:
         lines.append(f"URL:{escape_text(event.url)}")
