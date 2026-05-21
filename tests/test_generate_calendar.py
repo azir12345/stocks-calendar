@@ -9,17 +9,24 @@ from scripts.generate_calendar import (
     apply_nasdaq_enrichment,
     build_earnings_events,
     build_economic_events,
+    build_earnings_coverage_status,
     build_calculated_market_holiday_events,
     build_krx_market_holiday_events,
     build_us_market_holiday_events,
     extract_candidate_earnings_dates,
     format_revenue_estimate,
     load_auto_financial_events,
+    load_free_economic_events,
     load_earnings_rows,
     merge_missing_official_ir_rows,
     parse_official_earnings_text,
     render_ics,
     reuse_previous_calendar_if_empty,
+)
+from scripts.sync_apple_calendar import (
+    SYNC_MARKER_PREFIX,
+    build_applescript,
+    parse_ics,
 )
 
 
@@ -288,10 +295,64 @@ class GenerateCalendarTests(unittest.TestCase):
             )
 
         titles = [event.title for event in events]
-        self.assertIn("美国非农就业 NFP（预计发布日） - 高影响", titles)
-        self.assertIn("美国 PCE/Core PCE（预计发布日） - 高影响", titles)
+        self.assertIn("美国非农就业 NFP - 高影响", titles)
+        self.assertIn("美国 PCE/Core PCE - 高影响", titles)
         self.assertIn("美股休市 - Memorial Day", titles)
         self.assertTrue(any("Federal Reserve FOMC calendar failed" in warning for warning in warnings))
+
+    def test_official_macro_schedule_snapshot_overrides_estimated_rules(self):
+        warnings: list[str] = []
+        with patch("scripts.generate_calendar.fetch_text_url", side_effect=RuntimeError("network blocked")):
+            events = load_free_economic_events(
+                start_date=dt.date(2026, 5, 21),
+                end_date=dt.date(2026, 6, 20),
+                timezone="America/New_York",
+                reminder_days=1,
+                schedule_file=ROOT / "data/official_macro_releases.yaml",
+                warnings=warnings,
+            )
+
+        by_title = {event.title: event for event in events}
+        self.assertEqual(dt.date(2026, 5, 28), by_title["美国 PCE/Core PCE - 高影响"].start.date())
+        self.assertEqual(dt.date(2026, 6, 5), by_title["美国非农就业 NFP - 高影响"].start.date())
+        self.assertEqual(dt.date(2026, 6, 10), by_title["美国 CPI - 高影响"].start.date())
+        self.assertNotIn("预计发布日", "\n".join(by_title))
+        self.assertIn("官方发布项: Personal Income and Outlays", by_title["美国 PCE/Core PCE - 高影响"].description)
+        self.assertIn("统计期: May 2026", by_title["美国 CPI - 高影响"].description)
+
+    def test_earnings_coverage_status_exposes_source_quality(self):
+        rows = [
+            {
+                "symbol": "NVDA",
+                "date": "2026-05-20",
+                "time": "17:00",
+                "officialUrl": "https://nvidianews.nvidia.com/",
+                "timePrecision": "Company official IR",
+            },
+            {
+                "symbol": "AMD",
+                "date": "2026-05-05",
+                "sessionSource": "Nasdaq Earnings Calendar",
+            },
+        ]
+
+        status = build_earnings_coverage_status(
+            rows,
+            watch_symbols=[
+                WatchSymbol(symbol="NVDA", name="NVIDIA"),
+                WatchSymbol(symbol="AMD", name="AMD"),
+                WatchSymbol(symbol="AAPL", name="Apple"),
+            ],
+            default_timezone="America/New_York",
+        )
+
+        self.assertEqual(2, status["rows_total"])
+        self.assertEqual(["AMD", "NVDA"], status["symbols_with_events"])
+        self.assertEqual(["AAPL"], status["symbols_without_events_in_window"])
+        self.assertEqual(1, status["official_ir_confirmed_rows"])
+        self.assertEqual(1, status["nasdaq_session_enriched_rows"])
+        self.assertEqual(1, status["timed_rows"])
+        self.assertEqual([{"symbol": "AMD", "reason": "missing before/after/precise-time marker"}], status["low_confidence_rows"])
 
     def test_calculated_market_holidays_are_deduped_across_exchanges(self):
         events = build_us_market_holiday_events(
@@ -459,6 +520,58 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertIn("官方财报页面:", events[0].description)
         self.assertIn("TradingView: https://www.tradingview.com/chart/?symbol=NASDAQ%3AAMD", events[0].description)
         self.assertNotIn("Source: https://ir.amd.com/news-events/press-releases/detail/1282/amd-to-report-fiscal-first-quarter-2026-financial-results", events[0].description)
+
+    def test_apple_calendar_sync_parses_generated_ics(self):
+        rows = [
+            {
+                "symbol": "AAPL",
+                "date": "2026-05-08",
+                "time": "amc",
+                "revenueEstimated": 94500000000,
+            }
+        ]
+        events = build_earnings_events(
+            rows=rows,
+            watch_symbols=[WatchSymbol(symbol="AAPL", name="Apple", tradingview="NASDAQ:AAPL")],
+            timezone="America/New_York",
+            reminder_days=1,
+            timed_event_minutes=30,
+            links_config={"include_tradingview": True, "include_apple_stocks": True},
+        )
+        path = ROOT / "public/test-apple-sync.ics"
+        path.write_text(render_ics("Test", "Test calendar", events), encoding="utf-8")
+
+        parsed = parse_ics(path)
+        path.unlink()
+
+        self.assertEqual(1, len(parsed))
+        self.assertEqual("Apple (AAPL) 财报 - 盘后", parsed[0].summary)
+        self.assertEqual(dt.datetime(2026, 5, 8, 16, 5), parsed[0].start)
+        self.assertEqual(1, parsed[0].reminder_days_before)
+        self.assertEqual("https://www.tradingview.com/chart/?symbol=NASDAQ%3AAAPL", parsed[0].url)
+
+    def test_apple_calendar_sync_script_is_marker_based(self):
+        rows = [{"symbol": "MSFT", "date": "2026-05-12T16:05:00-04:00", "time": "16:05"}]
+        events = build_earnings_events(
+            rows=rows,
+            watch_symbols=[WatchSymbol(symbol="MSFT", name="Microsoft", tradingview="NASDAQ:MSFT")],
+            timezone="America/New_York",
+            reminder_days=1,
+            timed_event_minutes=30,
+            links_config={},
+        )
+        path = ROOT / "public/test-apple-script.ics"
+        path.write_text(render_ics("Test", "Test calendar", events), encoding="utf-8")
+        parsed = parse_ics(path)
+        path.unlink()
+
+        script = build_applescript("Stocks Calendar", parsed)
+
+        self.assertIn('tell application "Calendar"', script)
+        self.assertIn("make new calendar", script)
+        self.assertIn(SYNC_MARKER_PREFIX, script)
+        self.assertIn("make new display alarm", script)
+        self.assertIn("url:", script)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ financial_events:
   economic_calendar:
     enabled: true
     provider: official
+    schedule_file: data/official_macro_releases.yaml
     countries:
       - US
   market_holidays:

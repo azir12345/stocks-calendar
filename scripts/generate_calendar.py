@@ -28,6 +28,12 @@ NASDAQ_EARNINGS_URL = "https://api.nasdaq.com/api/calendar/earnings"
 FMP_ECONOMIC_CALENDAR_URL = "https://financialmodelingprep.com/stable/economic-calendar"
 FMP_MARKET_HOLIDAYS_URL = "https://financialmodelingprep.com/stable/holidays-by-exchange"
 FED_FOMC_CALENDAR_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+BLS_SCHEDULE_URLS = {
+    "cpi": "https://www.bls.gov/schedule/news_release/cpi.htm",
+    "nfp": "https://www.bls.gov/schedule/news_release/empsit.htm",
+}
+BEA_SCHEDULE_URL = "https://www.bea.gov/news/schedule"
+DEFAULT_MACRO_SCHEDULE_FILE = "data/official_macro_releases.yaml"
 DEFAULT_TIMEZONE = "America/New_York"
 
 WATCHLIST_TEXT = "INTC, NVDA, AMD, SNDK, STX, WDC, HSBC, AAPL, MSFT, TSLA, GOOG, IBKR, META, TSM, AVGO, QCOM, ARM, DELL, MU, GM, GE, IBM, AMZN"
@@ -305,6 +311,7 @@ def main() -> int:
         events.extend(
             load_auto_financial_events(
                 config=config,
+                root=root,
                 start_date=today,
                 end_date=end_date,
                 timezone=timezone,
@@ -330,6 +337,7 @@ def main() -> int:
         json.dumps(
             build_status(
                 events=events,
+                earnings_rows=earnings_rows,
                 watch_symbols=watch_symbols,
                 start_date=today,
                 end_date=end_date,
@@ -364,6 +372,7 @@ def load_yaml(path: Path) -> dict[str, Any]:
 def build_status(
     *,
     events: list[CalendarEvent],
+    earnings_rows: list[dict[str, Any]] | None = None,
     watch_symbols: list[WatchSymbol],
     start_date: dt.date,
     end_date: dt.date,
@@ -407,14 +416,65 @@ def build_status(
             if earnings_timezone(item, timezone) != timezone
         },
         "event_counts": counts,
+        "earnings_coverage": build_earnings_coverage_status(
+            earnings_rows or [],
+            watch_symbols=watch_symbols,
+            default_timezone=timezone,
+        ),
         "output_file": str(output_path),
         "warnings": warnings or [],
         "data_sources": {
             "earnings": "Financial Modeling Prep earnings-calendar",
             "earnings_session_enrichment": "Nasdaq earnings calendar" if nasdaq_enrichment_enabled else None,
-            "macro": "Federal Reserve official calendar + free scheduled release rules",
+            "macro": "Federal Reserve + BLS/BEA official schedules + local official snapshot fallback",
             "holidays": "Calculated US/KRX exchange holiday rules with official links",
         },
+    }
+
+
+def build_earnings_coverage_status(
+    rows: list[dict[str, Any]],
+    *,
+    watch_symbols: list[WatchSymbol],
+    default_timezone: str,
+) -> dict[str, Any]:
+    watch_by_symbol = build_watch_symbol_lookup(watch_symbols)
+    symbols_with_events: set[str] = set()
+    official_confirmed = 0
+    session_enriched = 0
+    timed_precise = 0
+    low_confidence: list[dict[str, str]] = []
+    for row in rows:
+        source_symbol = str(row.get("symbol", "")).upper()
+        watch_item = watch_by_symbol.get(source_symbol)
+        display_symbol = watch_item.symbol if watch_item else source_symbol
+        if display_symbol:
+            symbols_with_events.add(display_symbol)
+        if as_optional_str(row.get("officialUrl")) or as_optional_str(row.get("timePrecision")) == "Company official IR":
+            official_confirmed += 1
+        if as_optional_str(row.get("sessionSource")) == "Nasdaq Earnings Calendar":
+            session_enriched += 1
+        event_timezone = earnings_timezone(watch_item, default_timezone) if watch_item else default_timezone
+        _, precise_time = parse_earnings_datetime(row, event_timezone)
+        if precise_time is not None:
+            timed_precise += 1
+        if detect_session(row) == "unknown" and precise_time is None:
+            low_confidence.append(
+                {
+                    "symbol": display_symbol,
+                    "reason": "missing before/after/precise-time marker",
+                }
+            )
+
+    watchlist_symbols = {item.symbol for item in watch_symbols}
+    return {
+        "rows_total": len(rows),
+        "symbols_with_events": sorted(symbols_with_events),
+        "symbols_without_events_in_window": sorted(watchlist_symbols - symbols_with_events),
+        "official_ir_confirmed_rows": official_confirmed,
+        "nasdaq_session_enriched_rows": session_enriched,
+        "timed_rows": timed_precise,
+        "low_confidence_rows": low_confidence,
     }
 
 
@@ -1391,6 +1451,7 @@ def tradingview_link(watch_item: WatchSymbol, symbol: str) -> str:
 def load_auto_financial_events(
     *,
     config: dict[str, Any],
+    root: Path | None = None,
     start_date: dt.date,
     end_date: dt.date,
     timezone: str,
@@ -1419,6 +1480,7 @@ def load_auto_financial_events(
                     end_date=end_date,
                     timezone=timezone,
                     reminder_days=reminder_days,
+                    schedule_file=(root or Path.cwd()) / str(economic_config.get("schedule_file", DEFAULT_MACRO_SCHEDULE_FILE)),
                     warnings=warnings,
                 )
             )
@@ -1470,6 +1532,7 @@ def load_free_economic_events(
     end_date: dt.date,
     timezone: str,
     reminder_days: int,
+    schedule_file: Path,
     warnings: list[str] | None = None,
 ) -> list[CalendarEvent]:
     events: list[CalendarEvent] = []
@@ -1479,7 +1542,16 @@ def load_free_economic_events(
         warn_runtime(warnings, f"Federal Reserve FOMC calendar failed; using built-in FOMC fallback: {exc}")
         events.extend(build_known_fomc_events(start_date, end_date, timezone, reminder_days))
 
-    events.extend(build_scheduled_us_macro_events(start_date, end_date, timezone, reminder_days))
+    events.extend(
+        load_official_scheduled_macro_events(
+            start_date=start_date,
+            end_date=end_date,
+            timezone=timezone,
+            reminder_days=reminder_days,
+            schedule_file=schedule_file,
+            warnings=warnings,
+        )
+    )
     return dedupe_events(events)
 
 
@@ -1604,6 +1676,163 @@ def build_scheduled_us_macro_events(
     return events
 
 
+def load_official_scheduled_macro_events(
+    *,
+    start_date: dt.date,
+    end_date: dt.date,
+    timezone: str,
+    reminder_days: int,
+    schedule_file: Path,
+    warnings: list[str] | None = None,
+) -> list[CalendarEvent]:
+    rows: list[dict[str, Any]] = []
+    for category, url in BLS_SCHEDULE_URLS.items():
+        try:
+            rows.extend(load_bls_release_schedule(category, url))
+        except Exception as exc:
+            warn_runtime(warnings, f"BLS {category} release schedule failed; using local official snapshot: {exc}")
+    try:
+        rows.extend(load_bea_release_schedule())
+    except Exception as exc:
+        warn_runtime(warnings, f"BEA release schedule failed; using local official snapshot: {exc}")
+    rows.extend(load_macro_schedule_file(schedule_file))
+
+    events: list[CalendarEvent] = []
+    seen: set[tuple[str, dt.date]] = set()
+    for row in sorted(rows, key=macro_schedule_sort_key):
+        category = str(row.get("category", "")).lower()
+        event_date = coerce_date(row.get("date"))
+        if not category or event_date is None or event_date < start_date or event_date > end_date:
+            continue
+        key = (category, event_date)
+        if key in seen:
+            continue
+        seen.add(key)
+        event_time = parse_plain_time(row.get("time")) or dt.time(8, 30)
+        events.append(
+            build_free_macro_event(
+                category,
+                event_date,
+                event_time,
+                timezone,
+                reminder_days,
+                estimated=bool(row.get("estimated", False)),
+                release_name=as_optional_str(row.get("release_name")),
+                reference_period=as_optional_str(row.get("reference_period")),
+                source_name=as_optional_str(row.get("source_name")),
+                source_url=as_optional_str(row.get("source_url")),
+            )
+        )
+
+    scheduled_categories = {str(row.get("category", "")).lower() for row in rows}
+    missing_categories = {"cpi", "nfp", "pce"} - scheduled_categories
+    if missing_categories:
+        warn_runtime(
+            warnings,
+            f"Official macro schedule missing categories {', '.join(sorted(missing_categories))}; using estimated rules for those categories",
+        )
+        for event in build_scheduled_us_macro_events(start_date, end_date, timezone, reminder_days):
+            category = event.uid.split("-", 2)[1] if event.uid.startswith("economic-") else ""
+            if category in missing_categories:
+                events.append(event)
+    return sorted(dedupe_events(events), key=event_sort_key)
+
+
+def macro_schedule_sort_key(row: dict[str, Any]) -> tuple[dt.date, str]:
+    event_date = coerce_date(row.get("date")) or dt.date.max
+    return event_date, str(row.get("category", ""))
+
+
+def load_macro_schedule_file(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    data = load_yaml(path)
+    rows = data.get("releases", [])
+    if not isinstance(rows, list):
+        raise ValueError(f"Invalid macro schedule file: {path}")
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def load_bls_release_schedule(category: str, url: str) -> list[dict[str, Any]]:
+    page_text = html_to_text(fetch_text_url(url))
+    release_name = "Consumer Price Index" if category == "cpi" else "Employment Situation"
+    rows: list[dict[str, Any]] = []
+    pattern = re.compile(
+        rf"(Monday|Tuesday|Wednesday|Thursday|Friday),\s+([A-Za-z]+)\s+(\d{{1,2}}),\s+(\d{{4}})\s+"
+        rf"(\d{{1,2}}:\d{{2}}\s+[AP]\.M\.)\s+{re.escape(release_name)}(?:\s+for\s+([A-Za-z]+\s+\d{{4}}))?",
+        flags=re.IGNORECASE,
+    )
+    for match in pattern.finditer(page_text):
+        month_name, day, year, raw_time, reference_period = match.group(2), match.group(3), match.group(4), match.group(5), match.group(6)
+        rows.append(
+            {
+                "category": category,
+                "date": parse_month_name_date(month_name, int(day), int(year)),
+                "time": normalize_release_time(raw_time),
+                "reference_period": reference_period,
+                "release_name": release_name,
+                "source_name": "BLS Economic News Release Schedule",
+                "source_url": url,
+            }
+        )
+    return rows
+
+
+def load_bea_release_schedule() -> list[dict[str, Any]]:
+    page_text = html_to_text(fetch_text_url(BEA_SCHEDULE_URL))
+    rows: list[dict[str, Any]] = []
+    pattern = re.compile(
+        r"(Monday|Tuesday|Wednesday|Thursday|Friday),\s+([A-Za-z]+)\s+(\d{1,2}),\s+(\d{4}).{0,80}?"
+        r"(Personal Income and Outlays).{0,80}?(\d{1,2}:\d{2}\s+[AP]\.M\.)",
+        flags=re.IGNORECASE,
+    )
+    for match in pattern.finditer(page_text):
+        month_name, day, year, release_name, raw_time = match.group(2), match.group(3), match.group(4), match.group(5), match.group(6)
+        rows.append(
+            {
+                "category": "pce",
+                "date": parse_month_name_date(month_name, int(day), int(year)),
+                "time": normalize_release_time(raw_time),
+                "release_name": release_name,
+                "source_name": "BEA News Release Schedule",
+                "source_url": BEA_SCHEDULE_URL,
+            }
+        )
+    return rows
+
+
+def parse_month_name_date(month_name: str, day: int, year: int) -> dt.date:
+    month_numbers = {
+        "january": 1,
+        "february": 2,
+        "march": 3,
+        "april": 4,
+        "may": 5,
+        "june": 6,
+        "july": 7,
+        "august": 8,
+        "september": 9,
+        "october": 10,
+        "november": 11,
+        "december": 12,
+    }
+    month = month_numbers[month_name.lower()]
+    return dt.date(year, month, day)
+
+
+def normalize_release_time(raw_time: str) -> str:
+    match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s+([AP])\.M\.\s*", raw_time, flags=re.IGNORECASE)
+    if not match:
+        return "08:30"
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if match.group(3).upper() == "P" and hour != 12:
+        hour += 12
+    if match.group(3).upper() == "A" and hour == 12:
+        hour = 0
+    return f"{hour:02d}:{minute:02d}"
+
+
 def iter_months(start_date: dt.date, end_date: dt.date) -> list[dt.date]:
     months: list[dt.date] = []
     current = dt.date(start_date.year, start_date.month, 1)
@@ -1644,13 +1873,25 @@ def build_free_macro_event(
     timezone: str,
     reminder_days: int,
     estimated: bool = False,
+    release_name: str | None = None,
+    reference_period: str | None = None,
+    source_name: str | None = None,
+    source_url: str | None = None,
 ) -> CalendarEvent:
     rule = rule_by_category(category)
     if rule is None:
         raise ValueError(f"Unsupported macro category: {category}")
     start = dt.datetime.combine(event_date, event_time, tzinfo=ZoneInfo(timezone))
     end = start + dt.timedelta(minutes=30)
-    description = build_free_macro_description(rule, event_date, estimated=estimated)
+    description = build_free_macro_description(
+        rule,
+        event_date,
+        estimated=estimated,
+        release_name=release_name,
+        reference_period=reference_period,
+        source_name=source_name,
+        source_url=source_url,
+    )
     title = f"{rule['title']} - {rule['importance']}影响"
     if estimated:
         title = f"{rule['title']}（预计发布日） - {rule['importance']}影响"
@@ -1662,17 +1903,30 @@ def build_free_macro_event(
         all_day=False,
         timezone=timezone,
         description=description,
-        url=official_url_for_category(category),
+        url=source_url or official_url_for_category(category),
         reminder_days_before=reminder_days,
     )
 
 
-def build_free_macro_description(rule: dict[str, Any], event_date: dt.date, estimated: bool = False) -> str:
+def build_free_macro_description(
+    rule: dict[str, Any],
+    event_date: dt.date,
+    estimated: bool = False,
+    release_name: str | None = None,
+    reference_period: str | None = None,
+    source_name: str | None = None,
+    source_url: str | None = None,
+) -> str:
     category = str(rule["category"])
-    source_note = "Federal Reserve official FOMC calendar" if category.startswith("fomc") else "Free scheduled release rule with official source URL"
+    source_note = source_name or (
+        "Federal Reserve official FOMC calendar" if category.startswith("fomc") else "Free scheduled release rule with official source URL"
+    )
+    official_url = source_url or official_url_for_category(category)
     lines = [
         f"分类: {rule['title']}",
+        f"官方发布项: {release_name}" if release_name else "",
         "国家/地区: US",
+        f"统计期: {reference_period}" if reference_period else "",
         f"日期: {event_date.isoformat()}",
         f"重要性: {rule['importance']}",
         "",
@@ -1695,10 +1949,10 @@ def build_free_macro_description(rule: dict[str, Any], event_date: dt.date, esti
         "说明:",
         "该影响说明是规则化解读，不是投资建议；实际行情还要看核心分项、修正值、利率和市场仓位。",
         "发布时间说明: 该事件由免费规则化日程生成，需以官方页面最终公告为准。" if estimated else "发布时间说明: 该事件来自官方日程或官方日程规则。",
-        f"官方页面: {official_url_for_category(category)}",
+        f"官方页面: {official_url}",
         f"数据来源: {source_note}",
     ]
-    return "\n".join(lines)
+    return "\n".join(line for line in lines if line != "")
 
 
 def load_json_url(url: str) -> Any:

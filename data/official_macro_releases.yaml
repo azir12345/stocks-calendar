@@ -1,0 +1,43 @@
+releases:
+  - category: pce
+    date: 2026-05-28
+    time: "08:30"
+    reference_period: April 2026
+    release_name: Personal Income and Outlays
+    source_name: BEA News Release Schedule
+    source_url: https://www.bea.gov/news/schedule
+  - category: nfp
+    date: 2026-06-05
+    time: "08:30"
+    reference_period: May 2026
+    release_name: Employment Situation
+    source_name: BLS Economic News Release Schedule
+    source_url: https://www.bls.gov/schedule/news_release/empsit.htm
+  - category: cpi
+    date: 2026-06-10
+    time: "08:30"
+    reference_period: May 2026
+    release_name: Consumer Price Index
+    source_name: BLS Economic News Release Schedule
+    source_url: https://www.bls.gov/schedule/news_release/cpi.htm
+  - category: pce
+    date: 2026-06-25
+    time: "08:30"
+    reference_period: May 2026
+    release_name: Personal Income and Outlays
+    source_name: BEA News Release Schedule
+    source_url: https://www.bea.gov/news/schedule
+  - category: nfp
+    date: 2026-07-02
+    time: "08:30"
+    reference_period: June 2026
+    release_name: Employment Situation
+    source_name: BLS Economic News Release Schedule
+    source_url: https://www.bls.gov/schedule/news_release/empsit.htm
+  - category: cpi
+    date: 2026-07-14
+    time: "08:30"
+    reference_period: June 2026
+    release_name: Consumer Price Index
+    source_name: BLS Economic News Release Schedule
+    source_url: https://www.bls.gov/schedule/news_release/cpi.htm

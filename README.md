@@ -36,6 +36,10 @@ This project uses free data sources by default. Financial Modeling Prep is only 
 https://financialmodelingprep.com/stable/earnings-calendar
 https://api.nasdaq.com/api/calendar/earnings
 https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+https://www.bls.gov/schedule/news_release/cpi.htm
+https://www.bls.gov/schedule/news_release/empsit.htm
+https://www.bea.gov/news/schedule
+data/official_macro_releases.yaml
 Calculated NYSE/Nasdaq/KRX holiday rules with official exchange links
 Company IR press release RSS feeds and IR pages from `watchlist.yaml`
 ```
@@ -51,6 +55,8 @@ Value: <your-api-key>
 Local `.env` files are ignored. Use `.env.example` as a reference only.
 
 If FMP returns an authorization, payment, quota, or transient provider error, the workflow continues. It records the error in `public/status.json`, keeps any official IR/manual/free scheduled events it can still generate, and reuses the previously published `earnings.ics` when the degraded run would otherwise publish an empty calendar.
+
+`public/status.json` also includes `earnings_coverage`, which lists symbols with detected earnings events, symbols without events in the current 30-day window, official-IR-confirmed rows, Nasdaq session-enriched rows, timed rows, and low-confidence rows. This is intended to make future integration with a local investment database straightforward.
 
 ## Watchlist
 
@@ -138,7 +144,7 @@ The calendar includes:
 - US quarterly witching days
 - Manual company/technology events
 
-Only high-impact macro events are included by default. Free scheduled macro events include official links and rule-based impact notes; when consensus/actual values are not available, the event description says so explicitly. US and KRX exchange holidays are included as all-day events and are calculated locally so they do not depend on an API quota.
+Only high-impact macro events are included by default. Macro release dates are loaded from official BLS/BEA schedules first and fall back to `data/official_macro_releases.yaml` when official sites are temporarily unavailable. Rule-estimated dates are used only when both official sources and the local snapshot do not cover a category. US and KRX exchange holidays are included as all-day events and are calculated locally so they do not depend on an API quota.
 
 Each event description includes affected assets, expected direction when previous/estimate values are available, high-vs-low surprise logic, and watchlist tickers most likely to react.
 
@@ -188,6 +194,20 @@ Generate with the real provider:
 ```bash
 FMP_API_KEY=<your-api-key> python scripts/generate_calendar.py
 ```
+
+Preview a local Apple Calendar sync on macOS:
+
+```bash
+python scripts/sync_apple_calendar.py
+```
+
+This is disabled by default and only prints the events that would be written. To actually write the current `public/earnings.ics` events into a local Apple Calendar named `Stocks Calendar`, run:
+
+```bash
+python scripts/sync_apple_calendar.py --apply
+```
+
+The sync script creates/uses a separate Apple Calendar and marks events with an internal `stocks-calendar` UID in the event notes. On each apply run it replaces only previously synced events in the generated feed window, so it does not delete unrelated personal calendar items.
 
 ## GitHub Pages
 
