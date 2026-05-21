@@ -22,6 +22,7 @@ symbols:
   - symbol: STX
     name: Seagate Technology
     tradingview: NASDAQ:STX
+    ir_url: https://investors.seagate.com/news-events/press-releases/default.aspx
   - symbol: WDC
     name: Western Digital
     tradingview: NASDAQ:WDC
@@ -38,6 +39,7 @@ symbols:
   - symbol: NOK
     name: Nokia
     tradingview: NYSE:NOK
+    ir_url: https://www.nokia.com/about-us/investors/results-reports/
   - symbol: AAPL
     name: Apple
     tradingview: NASDAQ:AAPL
@@ -50,9 +52,11 @@ symbols:
   - symbol: TSLA
     name: Tesla
     tradingview: NASDAQ:TSLA
+    ir_url: https://ir.tesla.com/#quarterly-disclosure
   - symbol: GOOG
     name: Alphabet
     tradingview: NASDAQ:GOOG
+    ir_url: https://abc.xyz/investor/earnings/
   - symbol: IBKR
     name: Interactive Brokers
     tradingview: NASDAQ:IBKR
@@ -60,12 +64,15 @@ symbols:
   - symbol: META
     name: Meta Platforms
     tradingview: NASDAQ:META
+    ir_url: https://investor.atmeta.com/investor-news/default.aspx
   - symbol: TSM
     name: Taiwan Semiconductor Manufacturing
     tradingview: NYSE:TSM
+    ir_url: https://investor.tsmc.com/english/quarterly-results
   - symbol: STM
     name: STMicroelectronics
     tradingview: NYSE:STM
+    ir_url: https://investors.st.com/news-releases
   - symbol: AVGO
     name: Broadcom
     tradingview: NASDAQ:AVGO
@@ -74,6 +81,7 @@ symbols:
   - symbol: QCOM
     name: Qualcomm
     tradingview: NASDAQ:QCOM
+    ir_url: https://investor.qualcomm.com/news-events/press-releases
   - symbol: ARM
     name: Arm Holdings
     tradingview: NASDAQ:ARM
@@ -106,17 +114,22 @@ symbols:
   - symbol: AMZN
     name: Amazon
     tradingview: NASDAQ:AMZN
+    ir_url: https://ir.aboutamazon.com/news-release/default.aspx
   - symbol: TM
     name: Toyota Motor
     tradingview: NYSE:TM
+    ir_url: https://global.toyota/en/ir/financial-results/
   - symbol: PFE
     name: Pfizer
     tradingview: NYSE:PFE
+    ir_url: https://investors.pfizer.com/Investors/News/default.aspx
   - symbol: 000660.KS
     name: SK hynix
     tradingview: KRX:000660
     timezone: Asia/Seoul
+    ir_url: https://www.skhynix.com/ir/UI-FR-IR07_T01
   - symbol: 005930.KS
     name: Samsung Electronics
     tradingview: KRX:005930
     timezone: Asia/Seoul
+    ir_url: https://www.samsung.com/global/ir/financial-information/earnings-release/
