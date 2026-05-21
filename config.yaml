@@ -19,6 +19,16 @@ links:
   include_tradingview: true
   include_apple_stocks: true
 
+portfolio:
+  enabled: true
+  source: personalhub_dexter_export
+  path: /Users/azir/PersonalHub/exports/dexter/investment_context.json
+  include_holdings_in_watchlist: true
+  infer_market_holidays: true
+  minimum_quantity: 0
+  instrument_types:
+    - equity
+
 financial_events:
   enabled: true
   economic_calendar:

@@ -1,0 +1,35 @@
+{
+  "generated_at": "2026-05-21T20:08:46+08:00",
+  "current_holdings": [
+    {
+      "account_code": "ibkr-main",
+      "symbol": "000660.KS",
+      "name": "SK HYNIX INC",
+      "instrument_type": "equity",
+      "quantity": 3,
+      "currency_code": "KRW",
+      "platform_name": "IBKR",
+      "current_position_source": "holding_snapshot"
+    },
+    {
+      "account_code": "ibkr-wenhua",
+      "symbol": "XIACY",
+      "name": "XIAOMI CORP - UNSP ADR",
+      "instrument_type": "equity",
+      "quantity": 1,
+      "currency_code": "USD",
+      "platform_name": "IBKR",
+      "current_position_source": "holding_snapshot"
+    },
+    {
+      "account_code": "za",
+      "symbol": "LU0117843481",
+      "name": "JPMorgan Funds - Taiwan Fund",
+      "instrument_type": "fund",
+      "quantity": 1.887,
+      "currency_code": "USD",
+      "platform_name": "ZA",
+      "current_position_source": "transaction_rollup"
+    }
+  ]
+}

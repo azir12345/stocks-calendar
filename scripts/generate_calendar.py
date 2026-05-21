@@ -213,6 +213,7 @@ EXCHANGE_HOLIDAY_URLS = {
     "NASDAQ": "https://www.nasdaq.com/market-activity/stock-market-holiday-schedule",
     "NYSE": "https://www.nyse.com/markets/hours-calendars",
     "KRX": "https://global.krx.co.kr/contents/GLB/06/0602/0602010000/GLB0602010000.jsp",
+    "HKEX": "https://www.hkex.com.hk/Services/Trading/Securities/Overview/Trading-Calendar-and-Trading-Hours",
 }
 
 WITCHING_OFFICIAL_URL = "https://www.theocc.com/webapps/weekly-options"
@@ -228,6 +229,30 @@ class WatchSymbol:
     timezone: str | None = None
     ir_url: str | None = None
     ir_press_releases_rss: str | None = None
+
+
+@dataclass(frozen=True)
+class PortfolioHolding:
+    symbol: str
+    name: str | None
+    instrument_type: str | None
+    quantity: float
+    currency_code: str | None
+    account_code: str | None
+    platform_name: str | None
+    source: str
+
+
+@dataclass(frozen=True)
+class PortfolioContext:
+    enabled: bool
+    source: str | None
+    path: str | None
+    holdings: tuple[PortfolioHolding, ...]
+    inferred_exchanges: tuple[str, ...]
+    added_watch_symbols: tuple[str, ...]
+    holdings_by_exchange: dict[str, tuple[str, ...]]
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -260,6 +285,8 @@ def main() -> int:
     config = load_yaml(root / args.config)
     watch_symbols = load_watchlist(root / args.watchlist)
     calendar_config = config.get("calendar", {})
+    portfolio_context = load_portfolio_context(config, root=root, base_watch_symbols=watch_symbols, warnings=None)
+    watch_symbols = merge_portfolio_holdings_into_watchlist(watch_symbols, portfolio_context.holdings)
 
     timezone = str(calendar_config.get("timezone", DEFAULT_TIMEZONE))
     window_days = int(calendar_config.get("window_days", 30))
@@ -312,6 +339,7 @@ def main() -> int:
             load_auto_financial_events(
                 config=config,
                 root=root,
+                portfolio_context=portfolio_context,
                 start_date=today,
                 end_date=end_date,
                 timezone=timezone,
@@ -339,6 +367,7 @@ def main() -> int:
                 events=events,
                 earnings_rows=earnings_rows,
                 watch_symbols=watch_symbols,
+                portfolio_context=portfolio_context,
                 start_date=today,
                 end_date=end_date,
                 timezone=timezone,
@@ -369,11 +398,204 @@ def load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
+def load_portfolio_context(
+    config: dict[str, Any],
+    *,
+    root: Path,
+    base_watch_symbols: list[WatchSymbol],
+    warnings: list[str] | None,
+) -> PortfolioContext:
+    portfolio_config = config.get("portfolio", {})
+    if not portfolio_config.get("enabled", False):
+        return PortfolioContext(False, None, None, (), (), (), {})
+
+    source = str(portfolio_config.get("source", "personalhub_dexter_export"))
+    raw_path = str(portfolio_config.get("path", ""))
+    path = resolve_local_path(raw_path, root)
+    context_warnings: list[str] = []
+    if not path or not path.exists():
+        message = f"Portfolio source is enabled but missing: {raw_path}"
+        warn_runtime(warnings, message)
+        context_warnings.append(message)
+        return PortfolioContext(True, source, str(path) if path else raw_path, (), (), (), {}, tuple(context_warnings))
+
+    try:
+        holdings = tuple(load_portfolio_holdings_from_json(path, portfolio_config))
+    except Exception as exc:
+        message = f"Portfolio source failed; continuing without portfolio context: {exc}"
+        warn_runtime(warnings, message)
+        context_warnings.append(message)
+        return PortfolioContext(True, source, str(path), (), (), (), {}, tuple(context_warnings))
+
+    base_symbols = {item.symbol.upper() for item in base_watch_symbols}
+    added_symbols = tuple(sorted({holding.symbol for holding in holdings if holding.symbol.upper() not in base_symbols}))
+    holdings_by_exchange = group_holdings_by_exchange(holdings, base_watch_symbols)
+    inferred_exchanges = tuple(sorted(holdings_by_exchange))
+    return PortfolioContext(True, source, str(path), holdings, inferred_exchanges, added_symbols, holdings_by_exchange, tuple(context_warnings))
+
+
+def resolve_local_path(raw_path: str, root: Path) -> Path | None:
+    if not raw_path:
+        return None
+    expanded = Path(raw_path).expanduser()
+    if expanded.is_absolute():
+        return expanded
+    return root / expanded
+
+
+def load_portfolio_holdings_from_json(path: Path, portfolio_config: dict[str, Any]) -> list[PortfolioHolding]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("Portfolio export must be a JSON object")
+    rows = data.get("current_holdings", [])
+    if not isinstance(rows, list):
+        raise ValueError("Portfolio export current_holdings must be a list")
+
+    allowed_types = {str(item).lower() for item in portfolio_config.get("instrument_types", ["equity"])}
+    minimum_quantity = float(portfolio_config.get("minimum_quantity", 0))
+    holdings: list[PortfolioHolding] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        symbol = normalize_portfolio_symbol(row.get("symbol"))
+        instrument_type = as_optional_str(row.get("instrument_type"))
+        quantity = parse_float(row.get("quantity"))
+        if not symbol or quantity is None or quantity <= minimum_quantity:
+            continue
+        if allowed_types and str(instrument_type or "").lower() not in allowed_types:
+            continue
+        holdings.append(
+            PortfolioHolding(
+                symbol=symbol,
+                name=as_optional_str(row.get("name")),
+                instrument_type=instrument_type,
+                quantity=quantity,
+                currency_code=as_optional_str(row.get("currency_code")),
+                account_code=as_optional_str(row.get("account_code")),
+                platform_name=as_optional_str(row.get("platform_name")),
+                source=as_optional_str(row.get("current_position_source")) or path.name,
+            )
+        )
+    return holdings
+
+
+def normalize_portfolio_symbol(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    if not text or text in {"CASH", "USD", "HKD", "CNH", "KRW"}:
+        return ""
+    if "." in text and text.split(".", 1)[0] in {"USD", "HKD", "CNH", "KRW"}:
+        return ""
+    if "." in text and text.split(".", 1)[1] in {"USD", "HKD", "CNH", "KRW"}:
+        return ""
+    return text
+
+
+def parse_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(str(value).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def merge_portfolio_holdings_into_watchlist(
+    watch_symbols: list[WatchSymbol],
+    holdings: tuple[PortfolioHolding, ...],
+) -> list[WatchSymbol]:
+    merged = list(watch_symbols)
+    existing = {item.symbol.upper() for item in merged}
+    for holding in holdings:
+        if holding.symbol.upper() in existing:
+            continue
+        merged.append(
+            WatchSymbol(
+                symbol=holding.symbol,
+                name=holding.name,
+                tradingview=infer_tradingview_from_holding(holding),
+                timezone=infer_timezone_from_holding(holding),
+                earnings_timezone=infer_timezone_from_holding(holding),
+            )
+        )
+        existing.add(holding.symbol.upper())
+    return merged
+
+
+def infer_tradingview_from_holding(holding: PortfolioHolding) -> str | None:
+    symbol = holding.symbol.upper()
+    if symbol.endswith(".KS"):
+        return f"KRX:{symbol.removesuffix('.KS')}"
+    if symbol.endswith(".KQ"):
+        return f"KRX:{symbol.removesuffix('.KQ')}"
+    if symbol.endswith(".HK"):
+        return f"HKEX:{symbol.removesuffix('.HK')}"
+    if holding.currency_code and holding.currency_code.upper() == "KRW":
+        return f"KRX:{symbol}"
+    if holding.currency_code and holding.currency_code.upper() == "HKD":
+        return f"HKEX:{symbol}"
+    if symbol.endswith("Y") and holding.currency_code and holding.currency_code.upper() == "USD":
+        return f"OTC:{symbol}"
+    return None
+
+
+def infer_timezone_from_holding(holding: PortfolioHolding) -> str | None:
+    exchanges = infer_exchanges_for_holding(holding, {})
+    if "KRX" in exchanges:
+        return "Asia/Seoul"
+    if "HKEX" in exchanges:
+        return "Asia/Hong_Kong"
+    return None
+
+
+def infer_exchanges_from_holdings(
+    holdings: tuple[PortfolioHolding, ...],
+    watch_symbols: list[WatchSymbol],
+) -> set[str]:
+    return set(group_holdings_by_exchange(holdings, watch_symbols))
+
+
+def group_holdings_by_exchange(
+    holdings: tuple[PortfolioHolding, ...],
+    watch_symbols: list[WatchSymbol],
+) -> dict[str, tuple[str, ...]]:
+    watch_by_symbol = {item.symbol.upper(): item for item in watch_symbols}
+    grouped: dict[str, set[str]] = {}
+    for holding in holdings:
+        for exchange in infer_exchanges_for_holding(holding, watch_by_symbol):
+            grouped.setdefault(exchange, set()).add(holding.symbol)
+    return {exchange: tuple(sorted(symbols)) for exchange, symbols in sorted(grouped.items())}
+
+
+def infer_exchanges_for_holding(
+    holding: PortfolioHolding,
+    watch_by_symbol: dict[str, WatchSymbol],
+) -> set[str]:
+    symbol = holding.symbol.upper()
+    watch_item = watch_by_symbol.get(symbol)
+    tradingview = (watch_item.tradingview if watch_item else None) or infer_tradingview_from_holding(holding) or ""
+    prefix = tradingview.split(":", 1)[0].upper() if ":" in tradingview else ""
+    if prefix in {"NASDAQ", "NYSE", "KRX", "HKEX"}:
+        return {prefix}
+    if symbol.endswith((".KS", ".KQ")):
+        return {"KRX"}
+    if symbol.endswith(".HK"):
+        return {"HKEX"}
+    currency = (holding.currency_code or "").upper()
+    if currency == "KRW":
+        return {"KRX"}
+    if currency == "HKD":
+        return {"HKEX"}
+    if currency == "USD":
+        return {"NASDAQ", "NYSE"}
+    return set()
+
+
 def build_status(
     *,
     events: list[CalendarEvent],
     earnings_rows: list[dict[str, Any]] | None = None,
     watch_symbols: list[WatchSymbol],
+    portfolio_context: PortfolioContext | None = None,
     start_date: dt.date,
     end_date: dt.date,
     timezone: str,
@@ -421,6 +643,7 @@ def build_status(
             watch_symbols=watch_symbols,
             default_timezone=timezone,
         ),
+        "portfolio_context": build_portfolio_context_status(portfolio_context),
         "output_file": str(output_path),
         "warnings": warnings or [],
         "data_sources": {
@@ -475,6 +698,22 @@ def build_earnings_coverage_status(
         "nasdaq_session_enriched_rows": session_enriched,
         "timed_rows": timed_precise,
         "low_confidence_rows": low_confidence,
+    }
+
+
+def build_portfolio_context_status(portfolio_context: PortfolioContext | None) -> dict[str, Any]:
+    if portfolio_context is None:
+        return {"enabled": False}
+    return {
+        "enabled": portfolio_context.enabled,
+        "source": portfolio_context.source,
+        "path": portfolio_context.path,
+        "holdings_count": len(portfolio_context.holdings),
+        "holding_symbols": sorted({holding.symbol for holding in portfolio_context.holdings}),
+        "added_watch_symbols": list(portfolio_context.added_watch_symbols),
+        "inferred_exchanges": list(portfolio_context.inferred_exchanges),
+        "holdings_by_exchange": {exchange: list(symbols) for exchange, symbols in sorted(portfolio_context.holdings_by_exchange.items())},
+        "warnings": list(portfolio_context.warnings),
     }
 
 
@@ -1452,6 +1691,7 @@ def load_auto_financial_events(
     *,
     config: dict[str, Any],
     root: Path | None = None,
+    portfolio_context: PortfolioContext | None = None,
     start_date: dt.date,
     end_date: dt.date,
     timezone: str,
@@ -1490,6 +1730,8 @@ def load_auto_financial_events(
     holidays_config = financial_config.get("market_holidays", {})
     if holidays_config.get("enabled", False):
         exchanges = [str(item).upper() for item in holidays_config.get("exchanges", ["NASDAQ"])]
+        if holidays_config.get("from_portfolio", True) and portfolio_context is not None:
+            exchanges = sorted(set(exchanges) | set(portfolio_context.inferred_exchanges))
         provider = str(holidays_config.get("provider", "calculated")).lower()
         if provider == "fmp":
             try:
@@ -2322,6 +2564,8 @@ def build_calculated_market_holiday_events(
         events.extend(build_us_market_holiday_events(us_exchanges, start_date, end_date, timezone, reminder_days))
     if "KRX" in normalized_exchanges:
         events.extend(build_krx_market_holiday_events(start_date, end_date, reminder_days))
+    if "HKEX" in normalized_exchanges:
+        events.extend(build_hkex_market_holiday_events(start_date, end_date, reminder_days))
     return events
 
 
@@ -2518,6 +2762,63 @@ def krx_year_end_closure(year: int, holidays_by_date: set[dt.date]) -> dt.date:
     while day.weekday() >= 5 or day in holidays_by_date:
         day -= dt.timedelta(days=1)
     return day
+
+
+def build_hkex_market_holiday_events(
+    start_date: dt.date,
+    end_date: dt.date,
+    reminder_days: int,
+) -> list[CalendarEvent]:
+    official_url = EXCHANGE_HOLIDAY_URLS["HKEX"]
+    timezone = "Asia/Hong_Kong"
+    events: list[CalendarEvent] = []
+    for year in range(start_date.year, end_date.year + 1):
+        for event_date, name in hkex_market_holidays(year):
+            if event_date < start_date or event_date > end_date:
+                continue
+            description = "\n".join(
+                [
+                    "事件: 香港交易所休市",
+                    "交易所: HKEX",
+                    f"名称: {name}",
+                    "重要性: 高",
+                    "",
+                    "影响对象:",
+                    "港股、港股 ETF、港股基金申赎、以及相关 ADR/中概股跨市场预期",
+                    "",
+                    "影响逻辑:",
+                    "休市期间港股现货交易暂停；如果前后有美股或内地市场重大事件，相关 ADR 和港股可能出现跨市场延迟反应。",
+                    "",
+                    f"官方页面: {official_url}",
+                    "数据来源: Calculated HKEX holiday rules with Hong Kong public-holiday fallback",
+                ]
+            )
+            events.append(
+                CalendarEvent(
+                    uid=make_uid("holiday", "hkex", str(name), event_date.isoformat()),
+                    title=f"HKEX 休市 - {name}",
+                    start=event_date,
+                    end=event_date + dt.timedelta(days=1),
+                    all_day=True,
+                    timezone=timezone,
+                    description=description,
+                    url=official_url,
+                    reminder_days_before=reminder_days,
+                )
+            )
+    return events
+
+
+def hkex_market_holidays(year: int) -> list[tuple[dt.date, str]]:
+    try:
+        import holidays as holidays_lib
+    except ImportError:
+        return []
+    holidays_by_date: dict[dt.date, str] = {}
+    for event_date, name in holidays_lib.country_holidays("HK", years=[year], language="en_US").items():
+        if event_date.weekday() < 5:
+            holidays_by_date[event_date] = str(name)
+    return sorted(holidays_by_date.items(), key=lambda item: item[0])
 
 
 def observed_fixed_holiday(year: int, month: int, day: int) -> dt.date:

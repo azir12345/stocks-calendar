@@ -113,6 +113,23 @@ symbols:
 
 `symbol` and `tradingview` stay tied to the subscribed ticker you care about. `earnings_symbols` are the data-source symbols accepted for the company's earnings record. `earnings_timezone` is used for the generated event time when the earnings row comes from the underlying listing.
 
+## Portfolio Context
+
+The local branch can read a read-only PersonalHub investment export and use current holdings as calendar context:
+
+```yaml
+portfolio:
+  enabled: true
+  source: personalhub_dexter_export
+  path: /Users/azir/PersonalHub/exports/dexter/investment_context.json
+  include_holdings_in_watchlist: true
+  infer_market_holidays: true
+  instrument_types:
+    - equity
+```
+
+When enabled, equity holdings are merged into the generated watchlist for earnings lookup, and their inferred exchanges are added to the holiday calendar. For example, `000660.KS` adds KRX holidays, while USD-listed holdings add US market holidays. The generated `status.json` includes `portfolio_context` with holding symbols, added watchlist symbols, inferred exchanges, and holdings grouped by exchange.
+
 ## Timing Rules
 
 - The calendar window is today through the next 30 days.

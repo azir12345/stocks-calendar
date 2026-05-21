@@ -10,13 +10,16 @@ from scripts.generate_calendar import (
     build_earnings_events,
     build_economic_events,
     build_earnings_coverage_status,
+    build_portfolio_context_status,
     build_calculated_market_holiday_events,
     build_krx_market_holiday_events,
     build_us_market_holiday_events,
     extract_candidate_earnings_dates,
     format_revenue_estimate,
     load_auto_financial_events,
+    load_portfolio_context,
     load_free_economic_events,
+    merge_portfolio_holdings_into_watchlist,
     load_earnings_rows,
     merge_missing_official_ir_rows,
     parse_official_earnings_text,
@@ -396,6 +399,64 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertIn("美股休市 - Memorial Day", titles)
         self.assertIn(dt.date(2026, 5, 25), dates)
         self.assertIn(dt.date(2026, 6, 3), dates)
+
+    def test_portfolio_context_adds_holdings_and_infers_holidays(self):
+        config = {
+            "portfolio": {
+                "enabled": True,
+                "path": "tests/fixtures/personalhub_investment_context.json",
+                "instrument_types": ["equity"],
+                "minimum_quantity": 0,
+            }
+        }
+        base_watchlist = [WatchSymbol(symbol="NVDA", name="NVIDIA", tradingview="NASDAQ:NVDA")]
+
+        context = load_portfolio_context(config, root=ROOT, base_watch_symbols=base_watchlist, warnings=[])
+        merged = merge_portfolio_holdings_into_watchlist(base_watchlist, context.holdings)
+        status = build_portfolio_context_status(context)
+
+        self.assertEqual(["000660.KS", "XIACY"], sorted(context.added_watch_symbols))
+        self.assertEqual(["KRX", "NASDAQ", "NYSE"], list(context.inferred_exchanges))
+        self.assertIn("000660.KS", [item.symbol for item in merged])
+        self.assertIn("XIACY", [item.symbol for item in merged])
+        hynix = next(item for item in merged if item.symbol == "000660.KS")
+        xiacy = next(item for item in merged if item.symbol == "XIACY")
+        self.assertEqual("KRX:000660", hynix.tradingview)
+        self.assertEqual("Asia/Seoul", hynix.timezone)
+        self.assertEqual("OTC:XIACY", xiacy.tradingview)
+        self.assertEqual(["000660.KS", "XIACY"], status["added_watch_symbols"])
+        self.assertEqual(["KRX", "NASDAQ", "NYSE"], status["inferred_exchanges"])
+
+    def test_portfolio_inferred_exchanges_drive_holiday_generation(self):
+        config = {
+            "portfolio": {
+                "enabled": True,
+                "path": "tests/fixtures/personalhub_investment_context.json",
+                "instrument_types": ["equity"],
+            },
+            "financial_events": {
+                "enabled": True,
+                "economic_calendar": {"enabled": False},
+                "market_holidays": {"enabled": True, "provider": "calculated", "exchanges": []},
+                "witching_days": {"enabled": False},
+            },
+        }
+        context = load_portfolio_context(config, root=ROOT, base_watch_symbols=[], warnings=[])
+
+        events = load_auto_financial_events(
+            config=config,
+            root=ROOT,
+            portfolio_context=context,
+            start_date=dt.date(2026, 5, 20),
+            end_date=dt.date(2026, 6, 5),
+            timezone="America/New_York",
+            reminder_days=1,
+            warnings=[],
+        )
+
+        titles = [event.title for event in events]
+        self.assertTrue(any(title.startswith("KRX 休市") for title in titles))
+        self.assertIn("美股休市 - Memorial Day", titles)
 
     def test_empty_degraded_run_reuses_previous_calendar(self):
         warnings = ["Earnings provider failed"]
