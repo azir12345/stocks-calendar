@@ -11,6 +11,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 DEFAULT_ICS_PATH = "public/earnings.ics"
@@ -83,11 +84,13 @@ def parse_ics(path: Path) -> list[IcsEvent]:
         if line == "END:VALARM":
             in_alarm = False
             continue
-        name, value = split_ics_property(line)
+        name, params, value = split_ics_property(line)
         if in_alarm and name == "TRIGGER":
             alarm_trigger = value
         elif not in_alarm:
             current[name] = value
+            if "TZID" in params:
+                current[f"{name}_TZID"] = params["TZID"]
 
     return events
 
@@ -102,12 +105,19 @@ def unfold_ics_lines(lines: list[str]) -> list[str]:
     return unfolded
 
 
-def split_ics_property(line: str) -> tuple[str, str]:
+def split_ics_property(line: str) -> tuple[str, dict[str, str], str]:
     if ":" not in line:
-        return line, ""
+        return line, {}, ""
     key, value = line.split(":", 1)
-    name = key.split(";", 1)[0].upper()
-    return name, unescape_ics_text(value)
+    parts = key.split(";")
+    name = parts[0].upper()
+    params: dict[str, str] = {}
+    for part in parts[1:]:
+        if "=" not in part:
+            continue
+        param_name, param_value = part.split("=", 1)
+        params[param_name.upper()] = param_value.strip('"')
+    return name, params, unescape_ics_text(value)
 
 
 def event_from_properties(properties: dict[str, str], alarm_trigger: str | None) -> IcsEvent:
@@ -132,21 +142,23 @@ def parse_ics_datetime(properties: dict[str, str], name: str) -> tuple[dt.date |
         raise ValueError(f"ICS event is missing {name}")
     if re.fullmatch(r"\d{8}", raw_value):
         return dt.date(int(raw_value[:4]), int(raw_value[4:6]), int(raw_value[6:8])), True
-    match = re.fullmatch(r"(\d{8})T(\d{6})Z?", raw_value)
+    match = re.fullmatch(r"(\d{8})T(\d{6})(Z?)", raw_value)
     if not match:
         raise ValueError(f"Unsupported {name} value: {raw_value}")
-    date_part, time_part = match.groups()
-    return (
-        dt.datetime(
-            int(date_part[:4]),
-            int(date_part[4:6]),
-            int(date_part[6:8]),
-            int(time_part[:2]),
-            int(time_part[2:4]),
-            int(time_part[4:6]),
-        ),
-        False,
+    date_part, time_part, utc_marker = match.groups()
+    parsed = dt.datetime(
+        int(date_part[:4]),
+        int(date_part[4:6]),
+        int(date_part[6:8]),
+        int(time_part[:2]),
+        int(time_part[2:4]),
+        int(time_part[4:6]),
     )
+    if utc_marker:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    elif timezone_name := properties.get(f"{name}_TZID"):
+        parsed = parsed.replace(tzinfo=ZoneInfo(timezone_name))
+    return parsed, False
 
 
 def parse_alarm_days(trigger: str | None) -> int | None:
@@ -179,8 +191,8 @@ def unescape_ics_text(value: str) -> str:
 def build_applescript(calendar_name: str, events: list[IcsEvent]) -> str:
     if not events:
         return 'display notification "No stocks-calendar events to sync"\n'
-    window_start = min(event_date(event.start) for event in events)
-    window_end = max(event_date(event.end) for event in events) + dt.timedelta(days=1)
+    window_start = min(event_local_date(event.start) for event in events)
+    window_end = max(event_local_date(event.end) for event in events) + dt.timedelta(days=1)
 
     lines = [
         "on makeDate(theYear, theMonth, theDay, theSeconds)",
@@ -230,8 +242,9 @@ def applescript_create_event(event: IcsEvent) -> list[str]:
 
 def applescript_date(value: dt.date | dt.datetime) -> str:
     if isinstance(value, dt.datetime):
-        date_value = value.date()
-        seconds = value.hour * 3600 + value.minute * 60 + value.second
+        local_value = value.astimezone() if value.tzinfo is not None else value
+        date_value = local_value.date()
+        seconds = local_value.hour * 3600 + local_value.minute * 60 + local_value.second
     else:
         date_value = value
         seconds = 0
@@ -255,6 +268,13 @@ def applescript_date(value: dt.date | dt.datetime) -> str:
 def event_date(value: dt.date | dt.datetime) -> dt.date:
     if isinstance(value, dt.datetime):
         return value.date()
+    return value
+
+
+def event_local_date(value: dt.date | dt.datetime) -> dt.date:
+    if isinstance(value, dt.datetime):
+        local_value = value.astimezone() if value.tzinfo is not None else value
+        return local_value.date()
     return value
 
 

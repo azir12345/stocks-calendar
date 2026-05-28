@@ -1,10 +1,12 @@
 import datetime as dt
 import unittest
 import json
+import os
 import tempfile
 import urllib.error
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from scripts.generate_calendar import (
     CalendarEvent,
@@ -14,11 +16,17 @@ from scripts.generate_calendar import (
     build_earnings_events,
     build_economic_events,
     build_earnings_coverage_status,
+    build_event_change_status,
+    build_event_history_entry,
+    build_event_history_status,
     build_generic_exchange_market_holiday_events,
+    build_attention_items,
     build_portfolio_context_status,
+    build_macro_snapshot_status,
     build_calculated_market_holiday_events,
     build_krx_market_holiday_events,
     build_us_market_holiday_events,
+    event_source_score,
     holding_event_impact,
     extract_candidate_earnings_dates,
     format_revenue_estimate,
@@ -27,24 +35,30 @@ from scripts.generate_calendar import (
     load_symbol_mappings,
     load_portfolio_context,
     load_free_economic_events,
+    load_watchlist,
     merge_portfolio_holdings_into_watchlist,
     load_earnings_rows,
     merge_missing_official_ir_rows,
     next_trading_day,
     dedupe_earnings_rows,
+    likely_official_url,
     parse_official_earnings_text,
     prioritized_event_sort_key,
     portfolio_event_impact_score,
     render_dashboard_html,
     render_ics,
     reuse_previous_calendar_if_empty,
+    should_use_official_ir_fallback,
     validate_event_urls,
     validate_url,
 )
 from scripts.install_local_launchd import build_launchd_plist
+from scripts.health_check import evaluate_health
+from scripts.update_macro_snapshot import build_refresh_status, merge_macro_snapshot_rows
 from scripts.sync_apple_calendar import (
     SYNC_MARKER_PREFIX,
     build_applescript,
+    event_local_date,
     parse_ics,
 )
 
@@ -63,6 +77,41 @@ class GenerateCalendarTests(unittest.TestCase):
         )
 
         self.assertEqual(["AAPL", "MSFT"], [row["symbol"] for row in rows])
+
+    def test_missing_fmp_key_is_normal_free_mode_by_default(self):
+        with patch.dict(os.environ, {}, clear=True):
+            rows = load_earnings_rows(
+                config={"earnings": {"provider": "auto"}},
+                symbols=["AAPL"],
+                start_date=dt.date(2026, 5, 1),
+                end_date=dt.date(2026, 5, 31),
+                fixture=None,
+            )
+
+        self.assertEqual([], rows)
+
+    def test_missing_fmp_key_can_be_required(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(RuntimeError):
+                load_earnings_rows(
+                    config={"earnings": {"provider": "fmp", "require_provider": True}},
+                    symbols=["AAPL"],
+                    start_date=dt.date(2026, 5, 1),
+                    end_date=dt.date(2026, 5, 31),
+                    fixture=None,
+                )
+
+    def test_official_ir_provider_skips_fmp(self):
+        with patch.dict(os.environ, {}, clear=True):
+            rows = load_earnings_rows(
+                config={"earnings": {"provider": "official_ir"}},
+                symbols=["AAPL"],
+                start_date=dt.date(2026, 5, 1),
+                end_date=dt.date(2026, 5, 31),
+                fixture=None,
+            )
+
+        self.assertEqual([], rows)
 
     def test_market_session_event_uses_default_eastern_time(self):
         rows = [
@@ -91,6 +140,7 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertIn("TradingView: https://www.tradingview.com/chart/?symbol=NASDAQ%3AAAPL", events[0].description)
         self.assertIn("Apple Stocks: stocks://?symbol=AAPL", events[0].description)
         self.assertIn("营收预期: $94.5 B", events[0].description)
+        self.assertIn("来源评分: 75/100", events[0].description)
         self.assertIn("时间精度: 盘后标记，默认映射 16:05 America/New_York", events[0].description)
 
     def test_precise_datetime_becomes_timed_event(self):
@@ -285,6 +335,8 @@ class GenerateCalendarTests(unittest.TestCase):
 
         self.assertEqual(1, len(first))
         self.assertEqual(first, second)
+        self.assertEqual("2026-05-05", first[0]["matchReason"]["matched_date"])
+        self.assertIn("conference call", first[0]["matchReason"]["matched_keywords"])
         fetch.assert_called_once()
 
     def test_official_ir_url_patterns_skip_noisy_links(self):
@@ -320,6 +372,26 @@ class GenerateCalendarTests(unittest.TestCase):
 
         self.assertEqual(1, len(rows))
         self.assertEqual(["https://ir.amd.com/good-earnings-release-date"], audit["urls_scanned"])
+
+    def test_watchlist_can_disable_official_ir_fallback_scanning(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            watchlist_path = Path(tmpdir) / "watchlist.yaml"
+            watchlist_path.write_text(
+                "\n".join(
+                    [
+                        "symbols:",
+                        "  - symbol: TSLA",
+                        "    ir_url: https://ir.tesla.com/#quarterly-disclosure",
+                        "    official_ir_fallback_enabled: false",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            symbols = load_watchlist(watchlist_path)
+
+        self.assertFalse(symbols[0].official_ir_fallback_enabled)
+        self.assertFalse(should_use_official_ir_fallback(symbols[0]))
 
     def test_earnings_rows_dedupe_prefers_official_source(self):
         rows = [
@@ -445,7 +517,7 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertIn("美国非农就业 NFP - 高影响", titles)
         self.assertIn("美国 PCE/Core PCE - 高影响", titles)
         self.assertIn("美股休市 - Memorial Day", titles)
-        self.assertTrue(any("Federal Reserve FOMC calendar failed" in warning for warning in warnings))
+        self.assertEqual([], warnings)
 
     def test_official_macro_schedule_snapshot_overrides_estimated_rules(self):
         warnings: list[str] = []
@@ -466,6 +538,8 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertNotIn("预计发布日", "\n".join(by_title))
         self.assertIn("官方发布项: Personal Income and Outlays", by_title["美国 PCE/Core PCE - 高影响"].description)
         self.assertIn("统计期: May 2026", by_title["美国 CPI - 高影响"].description)
+        self.assertEqual("fallback_snapshot", by_title["美国 CPI - 高影响"].confidence)
+        self.assertIn("local official snapshot", by_title["美国 CPI - 高影响"].description)
 
     def test_earnings_coverage_status_exposes_source_quality(self):
         rows = [
@@ -502,7 +576,9 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertEqual([{"symbol": "AMD", "reason": "missing before/after/precise-time marker"}], status["low_confidence_rows"])
         coverage = {item["symbol"]: item for item in status["watchlist_source_coverage"]}
         self.assertEqual("official_ir_page_plus_event", coverage["NVDA"]["source_quality"])
+        self.assertEqual(95, coverage["NVDA"]["source_score"])
         self.assertEqual("provider_event", coverage["AMD"]["source_quality"])
+        self.assertEqual(35, coverage["AMD"]["source_score"])
         self.assertEqual("provider_only", coverage["AAPL"]["source_quality"])
 
     def test_symbol_mappings_include_themes_and_adr_exchange_exposure(self):
@@ -510,9 +586,84 @@ class GenerateCalendarTests(unittest.TestCase):
 
         self.assertIn("bank", mappings["HSBC"].themes)
         self.assertIn("LSE", mappings["HSBC"].exchanges)
+        self.assertEqual("HSBA.L", mappings["HSBC"].primary_symbol)
+        self.assertEqual("LSE", mappings["HSBC"].primary_exchange)
+        self.assertEqual("LSE:HSBA", mappings["HSBC"].primary_tradingview)
         self.assertIn("semiconductor", mappings["TSM"].themes)
         self.assertIn("TWSE", mappings["TSM"].exchanges)
         self.assertFalse(mappings["DRAM"].include_earnings)
+
+    def test_event_change_status_detects_schedule_and_source_updates(self):
+        current = [
+            {
+                "uid": "earnings-amd-2026-05-05",
+                "title": "AMD 财报 - 盘后",
+                "start": "2026-05-05T16:05:00-04:00",
+                "category": "earnings",
+                "confidence": "official_confirmed",
+                "source_score": 95,
+                "url": "https://www.tradingview.com/chart/?symbol=NASDAQ%3AAMD",
+            }
+        ]
+        previous = {
+            "event_summary": [
+                {
+                    "uid": "earnings-amd-2026-05-05",
+                    "title": "AMD 财报 - 盘后",
+                    "start": "2026-05-05",
+                    "category": "earnings",
+                    "confidence": "low_confidence",
+                    "source_score": 35,
+                    "url": "https://www.tradingview.com/chart/?symbol=NASDAQ%3AAMD",
+                }
+            ]
+        }
+
+        changes = build_event_change_status(previous, current)
+
+        self.assertTrue(changes["baseline_available"])
+        self.assertEqual(1, changes["changed_count"])
+        self.assertEqual({"before": "low_confidence", "after": "official_confirmed"}, changes["changed"][0]["changes"]["confidence"])
+        self.assertEqual({"before": 35, "after": 95}, changes["changed"][0]["changes"]["source_score"])
+
+    def test_event_history_entry_keeps_compact_audit_fields(self):
+        entry = build_event_history_entry(
+            {
+                "generated_at_utc": "2026-05-27T00:00:00+00:00",
+                "window": {"start": "2026-05-27", "end": "2026-06-26"},
+                "published_event_count": 12,
+                "event_counts": {"total": 13},
+                "confidence_counts": {"official_confirmed": 7},
+                "source_score_counts": {"90-99": 7},
+                "url_validation": {"failure_count": 0, "blocked_count": 6, "skipped_count": 1, "truncated": False},
+                "event_changes": {"baseline_available": True, "added_count": 1, "removed_count": 0, "changed_count": 2, "added": [{"title": "A"}]},
+                "warnings": [],
+                "attention_items": [{"severity": "info", "title": "URL 自动校验被站点阻挡"}],
+            }
+        )
+
+        self.assertEqual(12, entry["published_event_count"])
+        self.assertEqual(1, entry["event_changes"]["added_count"])
+        self.assertEqual(0, entry["url_validation"]["failure_count"])
+        self.assertEqual([], entry["attention_titles"])
+
+    def test_event_history_status_reports_previous_run_delta(self):
+        latest = {"generated_at_utc": "2026-05-28T00:00:00+00:00", "published_event_count": 14}
+        status = build_event_history_status(
+            {
+                "path": ".cache/event_history.json",
+                "max_runs": 60,
+                "runs": [
+                    {"generated_at_utc": "2026-05-27T00:00:00+00:00", "published_event_count": 12},
+                    latest,
+                ],
+            },
+            latest,
+        )
+
+        self.assertTrue(status["enabled"])
+        self.assertEqual(2, status["stored_runs"])
+        self.assertEqual(2, status["published_event_count_delta"])
 
     def test_portfolio_impact_rules_score_direct_macro_and_holiday_events(self):
         holding = PortfolioHolding(
@@ -727,6 +878,18 @@ class GenerateCalendarTests(unittest.TestCase):
                 "portfolio_event_impact": {"enabled": True},
                 "portfolio_context": {"enabled": True},
                 "macro_audit": [],
+                "official_ir_cache_audit": {
+                    "enabled": True,
+                    "symbols": [
+                        {
+                            "symbol": "AMD",
+                            "cached_event_rows": 0,
+                            "failure_count": 1,
+                            "truncated": False,
+                            "failures": [{"error": "HTTP Error 403", "url": "https://ir.amd.com"}],
+                        }
+                    ],
+                },
                 "warnings": [],
             },
             [event],
@@ -735,6 +898,8 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertIn("事件列表", html_text)
         self.assertIn("未来 7 天", html_text)
         self.assertIn("高影响事项", html_text)
+        self.assertIn("IR 抓取审计", html_text)
+        self.assertIn("HTTP Error 403", html_text)
         self.assertIn("财报覆盖", html_text)
         self.assertIn("NVIDIA (NVDA)", html_text)
 
@@ -771,6 +936,8 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertEqual(1, result["checked"])
         self.assertEqual([], result["failures"])
         self.assertEqual("apple_stocks_scheme", result["results"][0]["role"])
+        self.assertEqual({"skipped": 1}, result["status_counts"])
+        self.assertEqual(1, result["skipped_count"])
 
     def test_url_validation_marks_official_403_as_blocked(self):
         error = urllib.error.HTTPError(
@@ -787,6 +954,145 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertEqual("blocked", result["status"])
         self.assertEqual(403, result["status_code"])
         self.assertTrue(result["official_domain"])
+
+    def test_url_validation_treats_official_timeout_as_blocked(self):
+        with patch("scripts.generate_calendar.urllib.request.urlopen", side_effect=TimeoutError("The read operation timed out")):
+            result = validate_url("https://www.hkex.com.hk/News/HKEX-Calendar?sc_lang=en", timeout_seconds=1)
+
+        self.assertEqual("blocked", result["status"])
+        self.assertTrue(result["official_domain"])
+
+    def test_likely_official_url_does_not_misclassify_hkex_as_x(self):
+        self.assertTrue(likely_official_url("https://www.hkex.com.hk/News/HKEX-Calendar?sc_lang=en"))
+        self.assertFalse(likely_official_url("https://x.com/example"))
+
+    def test_macro_snapshot_status_flags_expiry(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            schedule_path = Path(tmpdir) / "macro.yaml"
+            schedule_path.write_text(
+                "\n".join(
+                    [
+                        "releases:",
+                        "  - category: cpi",
+                        "    date: 2026-06-10",
+                        "  - category: nfp",
+                        "    date: 2026-06-05",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            status = build_macro_snapshot_status(
+                {
+                    "financial_events": {
+                        "economic_calendar": {
+                            "enabled": True,
+                            "schedule_file": str(schedule_path),
+                        }
+                    }
+                },
+                start_date=dt.date(2026, 6, 1),
+                end_date=dt.date(2026, 7, 1),
+            )
+
+        self.assertTrue(status["expires_before_window_end"])
+        self.assertIn("pce", status["missing_categories_in_window"])
+
+    def test_macro_snapshot_merge_prefers_fetched_rows_and_prunes_old_rows(self):
+        merged = merge_macro_snapshot_rows(
+            [
+                {"category": "cpi", "date": "2026-05-01", "source_name": "old"},
+                {"category": "cpi", "date": "2026-06-10", "source_name": "snapshot"},
+            ],
+            [
+                {"category": "cpi", "date": "2026-06-10", "source_name": "official", "time": "08:30"},
+                {"category": "pce", "date": "2026-06-25", "source_name": "official"},
+            ],
+            today=dt.date(2026, 6, 1),
+            horizon_days=60,
+            retention_days=14,
+        )
+
+        self.assertEqual(["cpi", "pce"], [row["category"] for row in merged])
+        self.assertEqual("official", merged[0]["source_name"])
+        self.assertEqual("08:30", merged[0]["time"])
+
+    def test_macro_snapshot_refresh_status_is_machine_readable(self):
+        status = build_refresh_status(
+            output_path=Path("data/official_macro_releases.yaml"),
+            existing_rows=[{"category": "cpi", "date": "2026-06-10"}],
+            fetched_rows=[],
+            merged_rows=[{"category": "cpi", "date": "2026-06-10"}],
+            provider_status={"bls_cpi": {"ok": False, "error": "blocked"}},
+            today=dt.date(2026, 6, 1),
+        )
+
+        self.assertTrue(status["used_existing_snapshot"])
+        self.assertEqual("2026-06-10", status["latest_date"])
+        self.assertFalse(status["providers"]["bls_cpi"]["ok"])
+
+    def test_macro_snapshot_refresh_status_is_in_attention_items(self):
+        items = build_attention_items(
+            {
+                "warnings": [],
+                "url_validation": {"truncated": False, "failures": []},
+                "macro_snapshot": {
+                    "enabled": True,
+                    "expires_before_window_end": False,
+                    "expiring_soon": False,
+                    "missing_categories_in_window": [],
+                    "refresh_status": {
+                        "providers": {
+                            "bls_cpi": {"ok": False, "error": "blocked"},
+                            "bea": {"ok": True},
+                        }
+                    },
+                },
+                "official_ir_cache_audit": {"symbols": []},
+                "earnings_coverage": {"low_confidence_rows": []},
+            }
+        )
+
+        self.assertIn("宏观快照刷新部分失败", {item["title"] for item in items})
+
+    def test_health_check_fails_on_hard_status_failures(self):
+        failures, warnings = evaluate_health(
+            {
+                "published_event_count": 0,
+                "url_validation": {"failure_count": 1},
+                "macro_snapshot": {"enabled": True, "expires_before_window_end": True, "missing_categories_in_window": ["cpi"]},
+                "official_ir_cache_audit": {"symbols": [{"symbol": "AMD", "failure_count": 1}]},
+                "event_history": {"enabled": True, "published_event_count_delta": -6},
+                "source_score_counts": {"30-39": 3, "90-99": 6},
+            }
+        )
+
+        self.assertTrue(any("published_event_count" in item for item in failures))
+        self.assertTrue(any("url_validation" in item for item in failures))
+        self.assertTrue(any("official IR failures" in item for item in warnings))
+        self.assertTrue(any("dropped by 6" in item for item in warnings))
+        self.assertTrue(any("low source-score share" in item for item in warnings))
+
+    def test_attention_items_surface_operational_gaps(self):
+        items = build_attention_items(
+            {
+                "warnings": ["provider failed"],
+                "url_validation": {"truncated": True, "failures": []},
+                "macro_snapshot": {
+                    "enabled": True,
+                    "expires_before_window_end": True,
+                    "latest_date": "2026-06-10",
+                    "missing_categories_in_window": [],
+                },
+                "official_ir_cache_audit": {"symbols": [{"symbol": "AMD", "expired": True}]},
+                "earnings_coverage": {"low_confidence_rows": [{"symbol": "AMD"}]},
+            }
+        )
+
+        titles = {item["title"] for item in items}
+        self.assertIn("运行降级", titles)
+        self.assertIn("URL 校验未完整覆盖", titles)
+        self.assertIn("宏观快照未覆盖完整窗口", titles)
+        self.assertIn("IR 缓存过期", titles)
 
     def test_launchd_plist_builder_defaults_to_generate_only(self):
         plist_data = build_launchd_plist(repo_root=ROOT, hour=17, minute=30, sync_apple_calendar=False)
@@ -1006,7 +1312,7 @@ class GenerateCalendarTests(unittest.TestCase):
 
         self.assertEqual(1, len(parsed))
         self.assertEqual("Apple (AAPL) 财报 - 盘后", parsed[0].summary)
-        self.assertEqual(dt.datetime(2026, 5, 8, 16, 5), parsed[0].start)
+        self.assertEqual(dt.datetime(2026, 5, 8, 16, 5, tzinfo=ZoneInfo("America/New_York")), parsed[0].start)
         self.assertEqual(1, parsed[0].reminder_days_before)
         self.assertEqual("https://www.tradingview.com/chart/?symbol=NASDAQ%3AAAPL", parsed[0].url)
 
@@ -1032,6 +1338,11 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertIn(SYNC_MARKER_PREFIX, script)
         self.assertIn("make new display alarm", script)
         self.assertIn("url:", script)
+
+    def test_apple_calendar_cleanup_window_uses_local_timezone(self):
+        local_date = event_local_date(dt.datetime(2026, 6, 2, 17, 0, tzinfo=ZoneInfo("America/New_York")))
+
+        self.assertEqual(dt.datetime(2026, 6, 2, 17, 0, tzinfo=ZoneInfo("America/New_York")).astimezone().date(), local_date)
 
 
 if __name__ == "__main__":

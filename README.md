@@ -36,7 +36,7 @@ On iPhone:
 
 ## Data Source
 
-This project uses free data sources by default. Financial Modeling Prep is only used for earnings when an API key is available; macro events and exchange holidays do not require a paid provider.
+This project uses free data sources by default. Financial Modeling Prep is optional: when `FMP_API_KEY` is missing, the generator skips FMP normally and relies on official IR/manual/free sources. Macro events and exchange holidays do not require a paid provider.
 
 ```text
 https://financialmodelingprep.com/stable/earnings-calendar
@@ -60,9 +60,9 @@ Value: <your-api-key>
 
 Local `.env` files are ignored. Use `.env.example` as a reference only.
 
-If FMP returns an authorization, payment, quota, or transient provider error, the workflow continues. It records the error in `public/status.json`, keeps any official IR/manual/free scheduled events it can still generate, and reuses the previously published `earnings.ics` when the degraded run would otherwise publish an empty calendar.
+If `earnings.require_provider: true` is not set, a missing FMP key is not a warning. If FMP is configured and returns an authorization, payment, quota, or transient provider error, the workflow continues. It records the error in `public/status.json`, keeps any official IR/manual/free scheduled events it can still generate, and reuses the previously published `earnings.ics` when the degraded run would otherwise publish an empty calendar.
 
-`public/status.json` also includes `earnings_coverage`, which lists symbols with detected earnings events, symbols without events in the current 30-day window, official-IR-confirmed rows, Nasdaq session-enriched rows, timed rows, low-confidence rows, source quality, and event confidence. This is intended to make future integration with a local investment database straightforward.
+`public/status.json` also includes `earnings_coverage`, which lists symbols with detected earnings events, symbols without events in the current 30-day window, official-IR-confirmed rows, Nasdaq session-enriched rows, timed rows, low-confidence rows, source quality, source score, and event confidence. This is intended to make future integration with a local investment database straightforward.
 
 Official IR scanning is deliberately capped. Per-symbol `preferred_ir_url_patterns` and `skip_ir_url_patterns` in `watchlist.yaml` can move likely earnings announcement pages first and suppress noisy historical result pages. The scan cache records URL failures, skipped URLs, truncation, and next refresh timing in `official_ir_cache_audit`.
 
@@ -121,6 +121,19 @@ symbols:
 
 `symbol` and `tradingview` stay tied to the subscribed ticker you care about. `earnings_symbols` are the data-source symbols accepted for the company's earnings record. `earnings_timezone` is used for the generated event time when the earnings row comes from the underlying listing.
 
+ADR mappings can also declare the underlying primary listing explicitly:
+
+```yaml
+symbols:
+  - symbol: HSBC
+    canonical_symbol: HSBA.L
+    primary_symbol: HSBA.L
+    primary_exchange: LSE
+    primary_tradingview: LSE:HSBA
+    earnings_symbol: HSBA
+    earnings_timezone: Europe/London
+```
+
 ## Portfolio Context
 
 The local branch reads PersonalHub Postgres directly and falls back to the read-only Dexter export if the database is unavailable:
@@ -145,9 +158,13 @@ The generated `status.json` and `public/dashboard.html` include:
 - `portfolio_context`: holding symbols, added watchlist symbols, inferred exchanges, and holdings grouped by exchange
 - `portfolio_event_impact`: per-holding related calendar events, match reasons, impact scores, and market-value weighted impact scores when PersonalHub has market values
 - `macro_audit`: official source, reference period, URL, and whether the date was estimated
+- `macro_snapshot`: local macro schedule coverage, latest snapshot date, expiring-soon status, and missing categories
 - `earnings_coverage`: detected earnings rows, source quality, timed rows, and missing symbols
-- `confidence_counts` and `event_summary`: confidence levels, event categories, impact scores, and URLs
+- `confidence_counts`, `source_score_counts`, and `event_summary`: confidence levels, source scores, event categories, impact scores, and URLs
+- `event_changes`: added, removed, and changed events compared with the previous generated `status.json`
+- `event_history`: compact local audit history from `.cache/event_history.json`, including previous run delta and retained run count
 - `url_validation`: a capped, role-aware HTTP validation pass for `primary_event_url`, `official_source_url`, `tradingview_url`, `apple_stocks_scheme`, and source URLs
+- `attention_items`: operational items that need review, including provider degradation, URL failures/truncation, stale IR cache, low-confidence earnings, and macro snapshot gaps
 - holding themes such as semiconductor, memory, bank/rates-sensitive, auto, ADR, ETF, and local-market exposure
 
 ## Timing Rules
@@ -188,7 +205,7 @@ The calendar includes:
 - US quarterly witching days
 - Manual company/technology events
 
-Only high-impact macro events are included by default. Macro release dates are loaded from official BLS/BEA schedules first and fall back to `data/official_macro_releases.yaml` when official sites are temporarily unavailable. Rule-estimated dates are used only when both official sources and the local snapshot do not cover a category. US and KRX exchange holidays are included as all-day events and are calculated locally so they do not depend on an API quota.
+Only high-impact macro events are included by default. Macro release dates are loaded from official BLS/BEA schedules first and fall back to `data/official_macro_releases.yaml` when official sites are temporarily unavailable. Rule-estimated dates are used only when both official sources and the local snapshot do not cover a category. `status.json` reports whether the local macro snapshot covers the current window and whether it is close to expiry. US and KRX exchange holidays are included as all-day events and are calculated locally so they do not depend on an API quota.
 
 Each event description includes affected assets, expected direction when previous/estimate values are available, high-vs-low surprise logic, and watchlist tickers most likely to react.
 
@@ -239,11 +256,26 @@ Generate with the real provider:
 FMP_API_KEY=<your-api-key> python scripts/generate_calendar.py
 ```
 
+Force FMP to be required only when you intentionally want the workflow to fail without it:
+
+```yaml
+earnings:
+  provider: fmp
+  require_provider: true
+```
+
 The first real run may spend extra time building the official IR cache. Later runs reuse the cache until `earnings.official_ir_cache.ttl_hours` expires.
+
+Generation also keeps a compact local audit history in `.cache/event_history.json`. It stores recent run summaries and event-change counts so old iOS events can disappear from the rolling ICS while operational history remains inspectable locally.
 
 The generator also has stage-level caps:
 
 ```yaml
+calendar:
+  event_history:
+    enabled: true
+    path: .cache/event_history.json
+    max_runs: 60
 earnings:
   official_ir_cache:
     max_elapsed_seconds: 45
@@ -259,7 +291,7 @@ Preview a local Apple Calendar sync on macOS:
 python scripts/sync_apple_calendar.py
 ```
 
-This is disabled by default and only prints the events that would be written. To actually write the current `public/earnings.ics` events into a local Apple Calendar named `Stocks Calendar`, run:
+This is disabled by default and only prints the events that would be written. The parser preserves `TZID` from the generated ICS; when local Apple Calendar writing is explicitly enabled on macOS, timed events are converted to the Mac's local timezone before AppleScript creates them. To actually write the current `public/earnings.ics` events into a local Apple Calendar named `Stocks Calendar`, run:
 
 ```bash
 python scripts/sync_apple_calendar.py --apply
@@ -286,6 +318,20 @@ By default the installed job only regenerates the local files. To include Apple 
 ## GitHub Pages
 
 The included workflow deploys the `public` directory to GitHub Pages.
+
+The workflow has job/step timeouts so a provider or deployment hang does not block indefinitely. Push builds currently run for `main` and the local portfolio branch, but Pages upload/deploy steps only run on `main`. Feature-branch runs are validation-only and do not create a skipped deploy job. Before generation, the workflow also attempts a best-effort refresh of `data/official_macro_releases.yaml`; if official sites block the refresh, generation continues with the existing snapshot and writes `.cache/macro_snapshot_refresh.json` for audit. After generation, `scripts/health_check.py` fails only on hard output problems such as zero published events, URL failures, or macro snapshot gaps. It warns, without failing by default, when published event count drops sharply or low source-score events become a large share of the feed.
+
+Refresh the local macro snapshot manually:
+
+```bash
+python scripts/update_macro_snapshot.py
+```
+
+Check generated status locally:
+
+```bash
+python scripts/health_check.py
+```
 
 If Pages is not already active, set:
 

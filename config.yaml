@@ -9,12 +9,17 @@ calendar:
   status_path: public/status.json
   dashboard_path: public/dashboard.html
   compact_titles: true
+  event_history:
+    enabled: true
+    path: .cache/event_history.json
+    max_runs: 60
   ics_filter:
     min_impact_score: 70
     include_official_earnings: true
 
 earnings:
-  provider: fmp
+  provider: auto
+  require_provider: false
   require_confirmed_only: false
   include_observation_events: true
   official_ir_cache:

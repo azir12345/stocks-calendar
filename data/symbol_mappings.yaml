@@ -1,6 +1,9 @@
 symbols:
   - symbol: XIACY
     canonical_symbol: 1810.HK
+    primary_symbol: 1810.HK
+    primary_exchange: HKEX
+    primary_tradingview: HKEX:1810
     name: Xiaomi Corporation
     tradingview: HKEX:1810
     exchanges:
@@ -17,6 +20,9 @@ symbols:
     notes: Xiaomi ADR maps to Hong Kong ordinary shares for issuer events.
   - symbol: HSBC
     canonical_symbol: HSBA.L
+    primary_symbol: HSBA.L
+    primary_exchange: LSE
+    primary_tradingview: LSE:HSBA
     name: HSBC Holdings plc
     tradingview: NYSE:HSBC
     exchanges:
@@ -34,6 +40,9 @@ symbols:
       - adr
     notes: HSBC ADR maps to the London primary listing for issuer timing and LSE holiday exposure.
   - symbol: TSM
+    primary_symbol: 2330.TW
+    primary_exchange: TWSE
+    primary_tradingview: TWSE:2330
     name: Taiwan Semiconductor Manufacturing
     tradingview: NYSE:TSM
     exchanges:
@@ -48,6 +57,9 @@ symbols:
       - adr
     notes: TSM ADR is linked to Taiwan local-market exposure for holiday and theme analysis.
   - symbol: TM
+    primary_symbol: 7203.T
+    primary_exchange: TSE
+    primary_tradingview: TSE:7203
     name: Toyota Motor
     tradingview: NYSE:TM
     exchanges:
@@ -61,6 +73,9 @@ symbols:
       - adr
     notes: Toyota ADR is linked to Tokyo local-market exposure for holiday and theme analysis.
   - symbol: STM
+    primary_symbol: STMPA.PA
+    primary_exchange: EURONEXT
+    primary_tradingview: EURONEXT:STMPA
     name: STMicroelectronics
     tradingview: NYSE:STM
     exchanges:
@@ -75,6 +90,9 @@ symbols:
       - adr
     notes: STM ADR is linked to European local-market exposure for holiday and theme analysis.
   - symbol: NOK
+    primary_symbol: NOKIA.HE
+    primary_exchange: EURONEXT
+    primary_tradingview: OMXHEX:NOKIA
     name: Nokia
     tradingview: NYSE:NOK
     exchanges:

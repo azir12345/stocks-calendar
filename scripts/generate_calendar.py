@@ -217,9 +217,9 @@ EXCHANGE_HOLIDAY_URLS = {
     "NASDAQ": "https://www.nasdaq.com/market-activity/stock-market-holiday-schedule",
     "NYSE": "https://www.nyse.com/markets/hours-calendars",
     "KRX": "https://global.krx.co.kr/contents/GLB/06/0606/0606030101/GLB0606030101T3.jsp",
-    "HKEX": "https://www.hkex.com.hk/Services/Trading/Securities/Overview/Trading-Calendar-and-Trading-Hours",
+    "HKEX": "https://www.hkex.com.hk/News/HKEX-Calendar?sc_lang=en",
     "TSE": "https://www.jpx.co.jp/english/corporate/about-jpx/calendar/",
-    "TWSE": "https://www.twse.com.tw/en/holidaySchedule/holidaySchedule",
+    "TWSE": "https://wwwc.twse.com.tw/en/trading/holiday.html",
     "LSE": "https://www.londonstockexchange.com/personal-investing/tools/market-hours",
     "EURONEXT": "https://www.euronext.com/en/trade/trading-hours-holidays",
 }
@@ -347,6 +347,7 @@ class WatchSymbol:
     timezone: str | None = None
     ir_url: str | None = None
     ir_press_releases_rss: str | None = None
+    official_ir_fallback_enabled: bool = True
     preferred_ir_url_patterns: tuple[str, ...] = ()
     skip_ir_url_patterns: tuple[str, ...] = ()
 
@@ -375,6 +376,9 @@ class PortfolioHolding:
 class SymbolMapping:
     symbol: str
     canonical_symbol: str | None = None
+    primary_symbol: str | None = None
+    primary_exchange: str | None = None
+    primary_tradingview: str | None = None
     name: str | None = None
     tradingview: str | None = None
     exchanges: tuple[str, ...] = ()
@@ -385,6 +389,7 @@ class SymbolMapping:
     themes: tuple[str, ...] = ()
     preferred_ir_url_patterns: tuple[str, ...] = ()
     skip_ir_url_patterns: tuple[str, ...] = ()
+    official_ir_fallback_enabled: bool = True
     notes: str | None = None
 
 
@@ -531,6 +536,7 @@ def main() -> int:
         warnings=warnings,
         output_path=output_path,
     )
+    previous_status = load_json_file(status_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(calendar_text, encoding="utf-8")
     status_data = build_status(
@@ -546,7 +552,10 @@ def main() -> int:
         nasdaq_enrichment_enabled=nasdaq_enrichment_enabled,
         config=config,
         warnings=warnings,
+        previous_status=previous_status,
     )
+    status_data["event_history"] = update_event_history(root, calendar_config, status_data)
+    status_data["attention_items"] = build_attention_items(status_data)
     status_path.parent.mkdir(parents=True, exist_ok=True)
     status_path.write_text(json.dumps(status_data, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     dashboard_path.parent.mkdir(parents=True, exist_ok=True)
@@ -666,6 +675,9 @@ def load_symbol_mappings(path: Path) -> dict[str, SymbolMapping]:
         mappings[symbol] = SymbolMapping(
             symbol=symbol,
             canonical_symbol=as_optional_str(row.get("canonical_symbol")),
+            primary_symbol=as_optional_str(row.get("primary_symbol")) or as_optional_str(row.get("canonical_symbol")),
+            primary_exchange=as_optional_str(row.get("primary_exchange")),
+            primary_tradingview=as_optional_str(row.get("primary_tradingview")),
             name=as_optional_str(row.get("name")),
             tradingview=as_optional_str(row.get("tradingview")),
             exchanges=tuple(str(item).upper() for item in row.get("exchanges", []) or []),
@@ -676,6 +688,7 @@ def load_symbol_mappings(path: Path) -> dict[str, SymbolMapping]:
             themes=tuple(str(item).strip().lower() for item in row.get("themes", []) or [] if str(item).strip()),
             preferred_ir_url_patterns=parse_string_tuple(row.get("preferred_ir_url_patterns")),
             skip_ir_url_patterns=parse_string_tuple(row.get("skip_ir_url_patterns")),
+            official_ir_fallback_enabled=parse_bool(row.get("official_ir_fallback_enabled", True)),
             notes=as_optional_str(row.get("notes")),
         )
     return mappings
@@ -1057,6 +1070,7 @@ def build_status(
     nasdaq_enrichment_enabled: bool,
     config: dict[str, Any] | None = None,
     warnings: list[str] | None = None,
+    previous_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     counts = {
         "total": len(events),
@@ -1083,7 +1097,25 @@ def build_status(
     url_validation_config = config.get("url_validation", {})
     url_validation_enabled = bool(url_validation_config.get("enabled", True))
     published_events = published_events if published_events is not None else events
-    return {
+    earnings_coverage = build_earnings_coverage_status(
+        earnings_rows or [],
+        watch_symbols=watch_symbols,
+        default_timezone=timezone,
+    )
+    official_ir_cache_audit = build_official_ir_cache_audit(config)
+    macro_audit = build_macro_audit_status(events)
+    macro_snapshot = build_macro_snapshot_status(config, start_date=start_date, end_date=end_date)
+    portfolio_context_status = build_portfolio_context_status(portfolio_context)
+    portfolio_event_impact = build_portfolio_event_impact_status(events, portfolio_context)
+    event_summary = build_event_summary(events, portfolio_context)
+    url_validation = validate_event_urls(
+        events,
+        enabled=url_validation_enabled,
+        max_urls=int(url_validation_config.get("max_urls", 80)),
+        timeout_seconds=float(url_validation_config.get("timeout_seconds", 4)),
+        max_elapsed_seconds=float(url_validation_config.get("max_elapsed_seconds", 20)),
+    )
+    status = {
         "generated_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "window": {
             "start": start_date.isoformat(),
@@ -1092,7 +1124,9 @@ def build_status(
         },
         "published_event_count": len(published_events),
         "confidence_counts": build_confidence_counts(events),
-        "event_summary": build_event_summary(events, portfolio_context),
+        "source_score_counts": build_source_score_counts(events),
+        "event_summary": event_summary,
+        "event_changes": build_event_change_status(previous_status, event_summary),
         "watchlist_count": len(watch_symbols),
         "watchlist_symbols": [item.symbol for item in watch_symbols],
         "symbol_timezones": {
@@ -1101,22 +1135,13 @@ def build_status(
             if earnings_timezone(item, timezone) != timezone
         },
         "event_counts": counts,
-        "earnings_coverage": build_earnings_coverage_status(
-            earnings_rows or [],
-            watch_symbols=watch_symbols,
-            default_timezone=timezone,
-        ),
-        "official_ir_cache_audit": build_official_ir_cache_audit(config),
-        "macro_audit": build_macro_audit_status(events),
-        "portfolio_context": build_portfolio_context_status(portfolio_context),
-        "portfolio_event_impact": build_portfolio_event_impact_status(events, portfolio_context),
-        "url_validation": validate_event_urls(
-            events,
-            enabled=url_validation_enabled,
-            max_urls=int(url_validation_config.get("max_urls", 80)),
-            timeout_seconds=float(url_validation_config.get("timeout_seconds", 4)),
-            max_elapsed_seconds=float(url_validation_config.get("max_elapsed_seconds", 20)),
-        ),
+        "earnings_coverage": earnings_coverage,
+        "official_ir_cache_audit": official_ir_cache_audit,
+        "macro_audit": macro_audit,
+        "macro_snapshot": macro_snapshot,
+        "portfolio_context": portfolio_context_status,
+        "portfolio_event_impact": portfolio_event_impact,
+        "url_validation": url_validation,
         "output_file": str(output_path),
         "warnings": warnings or [],
         "data_sources": {
@@ -1126,6 +1151,8 @@ def build_status(
             "holidays": "Calculated US/KRX/HKEX/TSE/TWSE/LSE/Euronext exchange holiday rules with official links",
         },
     }
+    status["attention_items"] = build_attention_items(status)
+    return status
 
 
 def event_category(event: CalendarEvent) -> str:
@@ -1149,20 +1176,220 @@ def build_confidence_counts(events: list[CalendarEvent]) -> dict[str, int]:
     return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
 
 
+def build_source_score_counts(events: list[CalendarEvent]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for event in events:
+        score = event_source_score(event)
+        bucket = f"{score // 10 * 10}-{score // 10 * 10 + 9}" if score < 100 else "100"
+        counts[bucket] = counts.get(bucket, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: item[0], reverse=True))
+
+
 def build_event_summary(events: list[CalendarEvent], portfolio_context: PortfolioContext | None) -> list[dict[str, Any]]:
     summary: list[dict[str, Any]] = []
     for event in events:
         summary.append(
             {
+                "uid": event.uid,
                 "title": event.title,
                 "start": event_start_key(event.start),
                 "category": event_category(event),
                 "confidence": event.confidence,
+                "source_score": event_source_score(event),
+                "source_label": event_source_label(event),
                 "impact_score": portfolio_event_impact_score(event, portfolio_context),
                 "url": event.url,
             }
         )
     return summary
+
+
+def event_source_score(event: CalendarEvent) -> int:
+    if event.category == "holiday":
+        return 95 if event.confidence in {"official_confirmed", "rule_estimated"} else 80
+    if event.category == "macro":
+        if event.confidence == "official_confirmed":
+            return 95
+        if event.confidence == "fallback_snapshot":
+            return 85
+        if event.confidence == "rule_estimated":
+            return 55
+    if event.category == "earnings":
+        if event.confidence == "official_confirmed":
+            return 95
+        if event.confidence == "provider_confirmed":
+            return 75
+        if event.confidence == "fallback_snapshot":
+            return 70
+        if event.confidence == "rule_estimated":
+            return 50
+        if event.confidence == "low_confidence":
+            return 35
+    if event.confidence == "user_configured":
+        return 90
+    return 60
+
+
+def event_source_label(event: CalendarEvent) -> str:
+    return source_label_from_score(event_source_score(event))
+
+
+def source_label_from_score(score: int) -> str:
+    if score >= 90:
+        return "官方/人工高可信"
+    if score >= 75:
+        return "第三方或快照确认"
+    if score >= 55:
+        return "规则估算/兜底"
+    return "低可信，需复核"
+
+
+def build_event_change_status(previous_status: dict[str, Any] | None, current_summary: list[dict[str, Any]]) -> dict[str, Any]:
+    if not previous_status:
+        return {"enabled": True, "baseline_available": False, "added": [], "removed": [], "changed": []}
+    previous_summary = previous_status.get("event_summary", [])
+    if not isinstance(previous_summary, list):
+        return {"enabled": True, "baseline_available": False, "added": [], "removed": [], "changed": []}
+    previous_by_key = {event_change_key(item): item for item in previous_summary if isinstance(item, dict)}
+    current_by_key = {event_change_key(item): item for item in current_summary if isinstance(item, dict)}
+    added = [summarize_event_change_item(current_by_key[key]) for key in sorted(current_by_key.keys() - previous_by_key.keys())]
+    removed = [summarize_event_change_item(previous_by_key[key]) for key in sorted(previous_by_key.keys() - current_by_key.keys())]
+    changed: list[dict[str, Any]] = []
+    for key in sorted(current_by_key.keys() & previous_by_key.keys()):
+        before = previous_by_key[key]
+        after = current_by_key[key]
+        field_changes = {}
+        for field in ("start", "confidence", "source_score", "url"):
+            if before.get(field) != after.get(field):
+                field_changes[field] = {"before": before.get(field), "after": after.get(field)}
+        if field_changes:
+            changed.append(summarize_event_change_item(after) | {"changes": field_changes})
+    return {
+        "enabled": True,
+        "baseline_available": True,
+        "added_count": len(added),
+        "removed_count": len(removed),
+        "changed_count": len(changed),
+        "added": added[:50],
+        "removed": removed[:50],
+        "changed": changed[:50],
+    }
+
+
+def event_change_key(item: dict[str, Any]) -> str:
+    return "|".join(str(item.get(key) or "") for key in ("category", "title"))
+
+
+def summarize_event_change_item(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "uid": item.get("uid"),
+        "title": item.get("title"),
+        "start": item.get("start"),
+        "category": item.get("category"),
+        "confidence": item.get("confidence"),
+        "source_score": item.get("source_score"),
+        "url": item.get("url"),
+    }
+
+
+def update_event_history(root: Path, calendar_config: dict[str, Any], status: dict[str, Any]) -> dict[str, Any]:
+    history_config = calendar_config.get("event_history", {})
+    if not bool(history_config.get("enabled", True)):
+        return {"enabled": False}
+    history_path = resolve_history_path(root, history_config.get("path", ".cache/event_history.json"))
+    max_runs = max(1, int(history_config.get("max_runs", 60)))
+    history = load_event_history(history_path)
+    runs = history.get("runs", [])
+    if not isinstance(runs, list):
+        runs = []
+    entry = build_event_history_entry(status)
+    runs.append(entry)
+    history = {
+        "version": 1,
+        "path": str(history_path),
+        "updated_at_utc": entry["generated_at_utc"],
+        "max_runs": max_runs,
+        "runs": runs[-max_runs:],
+    }
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return build_event_history_status(history, entry)
+
+
+def resolve_history_path(root: Path, value: Any) -> Path:
+    path = Path(str(value or ".cache/event_history.json")).expanduser()
+    return path if path.is_absolute() else root / path
+
+
+def load_event_history(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"version": 1, "runs": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"version": 1, "runs": []}
+    return data if isinstance(data, dict) else {"version": 1, "runs": []}
+
+
+def build_event_history_entry(status: dict[str, Any]) -> dict[str, Any]:
+    event_changes = status.get("event_changes", {})
+    if not isinstance(event_changes, dict):
+        event_changes = {}
+    return {
+        "generated_at_utc": status.get("generated_at_utc"),
+        "window": status.get("window", {}),
+        "published_event_count": status.get("published_event_count", 0),
+        "event_counts": status.get("event_counts", {}),
+        "confidence_counts": status.get("confidence_counts", {}),
+        "source_score_counts": status.get("source_score_counts", {}),
+        "url_validation": summarize_url_validation_for_history(status.get("url_validation", {})),
+        "event_changes": {
+            "baseline_available": bool(event_changes.get("baseline_available")),
+            "added_count": int(event_changes.get("added_count") or 0),
+            "removed_count": int(event_changes.get("removed_count") or 0),
+            "changed_count": int(event_changes.get("changed_count") or 0),
+            "added": event_changes.get("added", [])[:20] if isinstance(event_changes.get("added"), list) else [],
+            "removed": event_changes.get("removed", [])[:20] if isinstance(event_changes.get("removed"), list) else [],
+            "changed": event_changes.get("changed", [])[:20] if isinstance(event_changes.get("changed"), list) else [],
+        },
+        "warnings_count": len(status.get("warnings", []) or []),
+        "attention_titles": [
+            str(item.get("title"))
+            for item in status.get("attention_items", []) or []
+            if isinstance(item, dict) and item.get("severity") in {"error", "warning"}
+        ],
+    }
+
+
+def summarize_url_validation_for_history(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "failure_count": int(value.get("failure_count") or 0),
+        "blocked_count": int(value.get("blocked_count") or 0),
+        "skipped_count": int(value.get("skipped_count") or 0),
+        "truncated": bool(value.get("truncated", False)),
+        "status_counts": value.get("status_counts", {}),
+    }
+
+
+def build_event_history_status(history: dict[str, Any], latest_entry: dict[str, Any]) -> dict[str, Any]:
+    runs = history.get("runs", [])
+    if not isinstance(runs, list):
+        runs = []
+    previous = runs[-2] if len(runs) >= 2 and isinstance(runs[-2], dict) else None
+    published_delta = None
+    if previous:
+        published_delta = int(latest_entry.get("published_event_count") or 0) - int(previous.get("published_event_count") or 0)
+    return {
+        "enabled": True,
+        "path": history.get("path"),
+        "stored_runs": len(runs),
+        "max_runs": history.get("max_runs"),
+        "latest_generated_at_utc": latest_entry.get("generated_at_utc"),
+        "previous_generated_at_utc": previous.get("generated_at_utc") if previous else None,
+        "published_event_count_delta": published_delta,
+    }
 
 
 def validate_event_urls(
@@ -1176,23 +1403,77 @@ def validate_event_urls(
     if not enabled:
         return {"enabled": False, "checked": 0, "results": []}
     targets = dedupe_url_targets([target for event in events for target in event_urls_for_validation(event)])
+    targets = prioritize_url_targets(targets, events)
     results: list[dict[str, Any]] = []
     deadline = time.monotonic() + max_elapsed_seconds
     truncated_by_timeout = False
-    for target in targets[:max_urls]:
-        if time.monotonic() >= deadline:
+    selected_targets = targets[:max_urls]
+    max_workers = min(8, max(1, len(selected_targets)))
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        futures = {
+            executor.submit(validate_url, str(target["url"]), timeout_seconds=timeout_seconds): target
+            for target in selected_targets
+        }
+        try:
+            for future in concurrent.futures.as_completed(futures, timeout=max_elapsed_seconds):
+                target = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = {"url": str(target["url"]), "status": "failed", "error": str(exc)[:240], "official_domain": likely_official_url(str(target["url"]))}
+                results.append(result | {"role": target["role"], "event_title": target["event_title"]})
+                if time.monotonic() >= deadline:
+                    truncated_by_timeout = True
+                    break
+        except concurrent.futures.TimeoutError:
             truncated_by_timeout = True
-            break
-        results.append(validate_url(str(target["url"]), timeout_seconds=timeout_seconds) | {"role": target["role"], "event_title": target["event_title"]})
+            for future in futures:
+                future.cancel()
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
     failures = [result for result in results if result["status"] not in {"ok", "redirect", "skipped", "blocked"}]
+    status_counts = count_url_validation_statuses(results)
     return {
         "enabled": True,
         "checked": len(results),
         "truncated": len(targets) > max_urls or truncated_by_timeout,
         "timeout_truncated": truncated_by_timeout,
+        "status_counts": status_counts,
+        "blocked_count": status_counts.get("blocked", 0),
+        "skipped_count": status_counts.get("skipped", 0),
+        "failure_count": len(failures),
         "failures": failures,
         "results": results,
     }
+
+
+def count_url_validation_statuses(results: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for result in results:
+        status = str(result.get("status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def prioritize_url_targets(targets: list[dict[str, str]], events: list[CalendarEvent]) -> list[dict[str, str]]:
+    impact_by_title = {event.title: portfolio_event_impact_score(event, None) for event in events}
+    role_order = {
+        "primary_event_url": 0,
+        "official_source_url": 1,
+        "tradingview_url": 2,
+        "source_url": 3,
+        "apple_stocks_scheme": 4,
+    }
+    return sorted(
+        targets,
+        key=lambda target: (
+            role_order.get(str(target.get("role", "")), 9),
+            -impact_by_title.get(str(target.get("event_title", "")), 0),
+            str(target.get("event_title", "")),
+            str(target.get("url", "")),
+        ),
+    )
 
 
 def event_urls_for_validation(event: CalendarEvent) -> list[dict[str, str]]:
@@ -1280,14 +1561,23 @@ def validate_url(url: str, *, timeout_seconds: float) -> dict[str, Any]:
             last_error = str(exc)
             if method == "HEAD":
                 continue
-            return {"url": url, "status": "failed", "error": last_error, "official_domain": likely_official_url(url)}
-    return {"url": url, "status": "failed", "error": "unreachable", "official_domain": likely_official_url(url)}
+            official_domain = likely_official_url(url)
+            if official_domain and is_transient_url_validation_error(last_error):
+                return {"url": url, "status": "blocked", "error": last_error, "official_domain": official_domain}
+            return {"url": url, "status": "failed", "error": last_error, "official_domain": official_domain}
+    official_domain = likely_official_url(url)
+    return {"url": url, "status": "blocked" if official_domain else "failed", "error": "unreachable", "official_domain": official_domain}
+
+
+def is_transient_url_validation_error(message: str) -> bool:
+    normalized = message.lower()
+    return any(marker in normalized for marker in ("timed out", "timeout", "temporarily unavailable", "connection reset", "ssl"))
 
 
 def likely_official_url(url: str) -> bool:
     host = urllib.parse.urlparse(url).netloc.lower()
     unofficial_markers = ("twitter.com", "x.com", "reddit.com", "wikipedia.org")
-    return bool(host) and not any(marker in host for marker in unofficial_markers)
+    return bool(host) and not any(host == marker or host.endswith(f".{marker}") for marker in unofficial_markers)
 
 
 def build_earnings_coverage_status(
@@ -1352,6 +1642,8 @@ def build_earnings_coverage_status(
                 "has_event_in_window": item.symbol in symbols_with_events,
                 "source_quality": source_quality,
                 "confidence": highest_earnings_confidence_for_symbol(rows, item, default_timezone),
+                "source_score": highest_earnings_source_score_for_symbol(rows, item, default_timezone),
+                "data_quality": earnings_data_quality_for_symbol(rows, item, default_timezone),
             }
         )
     return {
@@ -1362,8 +1654,57 @@ def build_earnings_coverage_status(
         "nasdaq_session_enriched_rows": session_enriched,
         "timed_rows": timed_precise,
         "low_confidence_rows": low_confidence,
+        "official_ir_matches": official_ir_match_status(rows, watch_symbols, default_timezone),
         "watchlist_source_coverage": watchlist_coverage,
     }
+
+
+def official_ir_match_status(rows: list[dict[str, Any]], watch_symbols: list[WatchSymbol], default_timezone: str) -> list[dict[str, Any]]:
+    watch_by_symbol = build_watch_symbol_lookup(watch_symbols)
+    matches: list[dict[str, Any]] = []
+    for row in rows:
+        if as_optional_str(row.get("source")) != "Company official IR fallback":
+            continue
+        source_symbol = str(row.get("symbol", "")).upper()
+        watch_item = watch_by_symbol.get(source_symbol)
+        event_date, _ = parse_earnings_datetime(row, earnings_timezone(watch_item, default_timezone) if watch_item else default_timezone)
+        matches.append(
+            {
+                "symbol": watch_item.symbol if watch_item else source_symbol,
+                "source_symbol": source_symbol,
+                "date": event_date.isoformat() if event_date else None,
+                "official_url": as_optional_str(row.get("officialUrl")),
+                "match_reason": row.get("matchReason", {}),
+            }
+        )
+    return matches
+
+
+def earnings_data_quality_for_symbol(rows: list[dict[str, Any]], item: WatchSymbol, default_timezone: str) -> dict[str, str | None]:
+    lookup_symbols = {symbol.upper() for symbol in item.earnings_symbols or (item.symbol,)}
+    matching_rows = [
+        row
+        for row in rows
+        if str(row.get("symbol", "")).upper() in lookup_symbols
+        and parse_earnings_datetime(row, earnings_timezone(item, default_timezone))[0] is not None
+    ]
+    if not matching_rows:
+        if item.ir_url or item.ir_press_releases_rss:
+            return {"level": "watching_official_ir", "reason": "no event in current window; official IR configured"}
+        return {"level": "provider_only_no_event", "reason": "no event in current window and no official IR configured"}
+    best = max(matching_rows, key=earnings_row_rank)
+    confidence = earnings_row_confidence(best)
+    if confidence == "official_confirmed" and as_optional_str(best.get("source")) == "Company official IR fallback":
+        return {"level": "official_ir_confirmed", "reason": "matched official company IR page/RSS"}
+    if confidence == "official_confirmed":
+        return {"level": "official_confirmed", "reason": "official URL or company IR timing present"}
+    if confidence == "provider_confirmed":
+        return {"level": "provider_confirmed", "reason": "provider event found; official IR not confirmed"}
+    if confidence == "fallback_snapshot":
+        return {"level": "fallback_snapshot", "reason": "local snapshot fallback"}
+    if confidence == "rule_estimated":
+        return {"level": "rule_estimated", "reason": "rule-estimated timing"}
+    return {"level": "low_confidence", "reason": "missing precise time and before/after session marker"}
 
 
 def highest_earnings_confidence_for_symbol(rows: list[dict[str, Any]], item: WatchSymbol, default_timezone: str) -> str | None:
@@ -1378,6 +1719,19 @@ def highest_earnings_confidence_for_symbol(rows: list[dict[str, Any]], item: Wat
         return None
     order = {"official_confirmed": 4, "provider_confirmed": 3, "fallback_snapshot": 2, "rule_estimated": 1, "low_confidence": 0}
     return max(values, key=lambda value: order.get(value, 0))
+
+
+def highest_earnings_source_score_for_symbol(rows: list[dict[str, Any]], item: WatchSymbol, default_timezone: str) -> int | None:
+    values = []
+    lookup_symbols = {symbol.upper() for symbol in item.earnings_symbols or (item.symbol,)}
+    for row in rows:
+        if str(row.get("symbol", "")).upper() not in lookup_symbols:
+            continue
+        event_date, _ = parse_earnings_datetime(row, earnings_timezone(item, default_timezone))
+        if event_date is None:
+            continue
+        values.append(earnings_row_source_score(row))
+    return max(values) if values else None
 
 
 def build_official_ir_cache_audit(config: dict[str, Any] | None) -> dict[str, Any]:
@@ -1456,8 +1810,31 @@ def build_portfolio_context_status(portfolio_context: PortfolioContext | None) -
             for holding in sorted(portfolio_context.holdings, key=lambda item: item.symbol)
         },
         "theme_counts": build_theme_counts(portfolio_context.holdings),
+        "adr_mappings": build_adr_mapping_status(portfolio_context.symbol_mappings),
         "warnings": list(portfolio_context.warnings),
     }
+
+
+def build_adr_mapping_status(symbol_mappings: dict[str, SymbolMapping]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for symbol, mapping in sorted(symbol_mappings.items()):
+        if "adr" not in mapping.themes and not mapping.primary_symbol and not mapping.canonical_symbol:
+            continue
+        rows.append(
+            {
+                "symbol": symbol,
+                "canonical_symbol": mapping.canonical_symbol,
+                "primary_symbol": mapping.primary_symbol,
+                "primary_exchange": mapping.primary_exchange,
+                "adr_tradingview": mapping.tradingview,
+                "primary_tradingview": mapping.primary_tradingview,
+                "earnings_symbols": list(mapping.earnings_symbols or ()),
+                "earnings_timezone": mapping.earnings_timezone,
+                "exchanges": list(mapping.exchanges),
+                "notes": mapping.notes,
+            }
+        )
+    return rows
 
 
 def build_theme_counts(holdings: tuple[PortfolioHolding, ...]) -> dict[str, int]:
@@ -1495,6 +1872,143 @@ def build_macro_audit_status(events: list[CalendarEvent]) -> list[dict[str, Any]
             }
         )
     return audit
+
+
+def build_macro_snapshot_status(config: dict[str, Any] | None, *, start_date: dt.date, end_date: dt.date) -> dict[str, Any]:
+    if not config:
+        return {"enabled": False}
+    economic_config = config.get("financial_events", {}).get("economic_calendar", {})
+    if not economic_config.get("enabled", False):
+        return {"enabled": False}
+    schedule_path = Path(str(economic_config.get("schedule_file", DEFAULT_MACRO_SCHEDULE_FILE)))
+    rows = load_macro_schedule_file(schedule_path)
+    dates = [coerce_date(row.get("date")) for row in rows]
+    valid_dates = [value for value in dates if value is not None]
+    categories = sorted({str(row.get("category", "")).lower() for row in rows if row.get("category")})
+    latest_date = max(valid_dates) if valid_dates else None
+    required_categories = {"cpi", "nfp", "pce"}
+    missing_categories_in_window = sorted(
+        category
+        for category in required_categories
+        if not any(
+            str(row.get("category", "")).lower() == category
+            and (date_value := coerce_date(row.get("date"))) is not None
+            and start_date <= date_value <= end_date
+            for row in rows
+        )
+    )
+    days_past_window = (latest_date - end_date).days if latest_date else None
+    refresh_status = load_json_file(Path(".cache/macro_snapshot_refresh.json"))
+    return {
+        "enabled": True,
+        "path": str(schedule_path),
+        "row_count": len(rows),
+        "categories": categories,
+        "latest_date": latest_date.isoformat() if latest_date else None,
+        "covers_window": bool(latest_date and latest_date >= end_date),
+        "days_past_window": days_past_window,
+        "expires_before_window_end": bool(latest_date and latest_date < end_date),
+        "expiring_soon": bool(latest_date and latest_date < end_date + dt.timedelta(days=14)),
+        "missing_categories_in_window": missing_categories_in_window,
+        "refresh_status": refresh_status,
+    }
+
+
+def load_json_file(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def build_attention_items(status: dict[str, Any]) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    for warning in status.get("warnings", []) or []:
+        items.append({"severity": "warning", "area": "runtime", "title": "运行降级", "detail": str(warning)})
+
+    url_validation = status.get("url_validation", {})
+    if isinstance(url_validation, dict):
+        failures = url_validation.get("failures", [])
+        if isinstance(failures, list) and failures:
+            items.append({"severity": "error", "area": "url", "title": "URL 校验失败", "detail": f"{len(failures)} 个 URL 无法访问"})
+        if url_validation.get("truncated"):
+            items.append({"severity": "warning", "area": "url", "title": "URL 校验未完整覆盖", "detail": "校验达到数量或时间上限，status.json 保留已检查结果"})
+        blocked_count = int(url_validation.get("blocked_count") or 0)
+        if blocked_count:
+            items.append({"severity": "info", "area": "url", "title": "URL 自动校验被站点阻挡", "detail": f"{blocked_count} 个官方 URL 返回 401/403，未按坏链接处理"})
+
+    earnings_coverage = status.get("earnings_coverage", {})
+    if isinstance(earnings_coverage, dict):
+        low_confidence = earnings_coverage.get("low_confidence_rows", [])
+        if isinstance(low_confidence, list) and low_confidence:
+            items.append({"severity": "warning", "area": "earnings", "title": "低可信财报时间", "detail": f"{len(low_confidence)} 条财报缺少盘前/盘后或分钟级时间"})
+
+    event_changes = status.get("event_changes", {})
+    if isinstance(event_changes, dict) and event_changes.get("baseline_available"):
+        changed_count = int(event_changes.get("changed_count") or 0)
+        added_count = int(event_changes.get("added_count") or 0)
+        removed_count = int(event_changes.get("removed_count") or 0)
+        if changed_count or added_count or removed_count:
+            items.append(
+                {
+                    "severity": "info",
+                    "area": "events",
+                    "title": "日程相对上次生成有变化",
+                    "detail": f"新增 {added_count}，移除 {removed_count}，更新 {changed_count}",
+                }
+            )
+
+    event_history = status.get("event_history", {})
+    if isinstance(event_history, dict) and event_history.get("enabled"):
+        delta = event_history.get("published_event_count_delta")
+        if isinstance(delta, int) and abs(delta) >= 5:
+            items.append(
+                {
+                    "severity": "info",
+                    "area": "events",
+                    "title": "发布事件数量变化较大",
+                    "detail": f"相对上次生成变化 {delta:+d} 个",
+                }
+            )
+
+    ir_audit = status.get("official_ir_cache_audit", {})
+    if isinstance(ir_audit, dict):
+        symbols = ir_audit.get("symbols", [])
+        if isinstance(symbols, list):
+            expired = [item for item in symbols if isinstance(item, dict) and item.get("expired")]
+            failed = [item for item in symbols if isinstance(item, dict) and item.get("failure_count")]
+            truncated = [item for item in symbols if isinstance(item, dict) and item.get("truncated")]
+            if expired:
+                items.append({"severity": "warning", "area": "official_ir", "title": "IR 缓存过期", "detail": f"{len(expired)} 个 symbol 需要刷新"})
+            if failed:
+                items.append({"severity": "warning", "area": "official_ir", "title": "IR 抓取有失败", "detail": f"{len(failed)} 个 symbol 存在 URL 抓取失败"})
+            if truncated:
+                items.append({"severity": "info", "area": "official_ir", "title": "IR 扫描被截断", "detail": f"{len(truncated)} 个 symbol 命中 URL 数量或阶段上限"})
+
+    macro_snapshot = status.get("macro_snapshot", {})
+    if isinstance(macro_snapshot, dict) and macro_snapshot.get("enabled"):
+        if macro_snapshot.get("expires_before_window_end"):
+            items.append({"severity": "warning", "area": "macro", "title": "宏观快照未覆盖完整窗口", "detail": f"最新快照日期 {macro_snapshot.get('latest_date')}"})
+        elif macro_snapshot.get("expiring_soon"):
+            items.append({"severity": "info", "area": "macro", "title": "宏观快照即将需要更新", "detail": f"最新快照日期 {macro_snapshot.get('latest_date')}"})
+        missing = macro_snapshot.get("missing_categories_in_window", [])
+        if isinstance(missing, list) and missing:
+            items.append({"severity": "warning", "area": "macro", "title": "宏观快照类别缺口", "detail": ", ".join(map(str, missing))})
+        refresh_status = macro_snapshot.get("refresh_status")
+        if isinstance(refresh_status, dict):
+            providers = refresh_status.get("providers", {})
+            failed_providers = [
+                name
+                for name, provider in providers.items()
+                if isinstance(provider, dict) and not provider.get("ok", False)
+            ] if isinstance(providers, dict) else []
+            if failed_providers:
+                items.append({"severity": "info", "area": "macro", "title": "宏观快照刷新部分失败", "detail": ", ".join(sorted(failed_providers))})
+
+    return items
 
 
 def extract_description_field(description: str, label: str) -> str | None:
@@ -1769,6 +2283,7 @@ def load_watchlist(path: Path) -> list[WatchSymbol]:
                 timezone=as_optional_str(item.get("timezone")),
                 ir_url=as_optional_str(item.get("ir_url")),
                 ir_press_releases_rss=as_optional_str(item.get("ir_press_releases_rss")),
+                official_ir_fallback_enabled=parse_bool(item.get("official_ir_fallback_enabled", True)),
                 preferred_ir_url_patterns=parse_string_tuple(item.get("preferred_ir_url_patterns")),
                 skip_ir_url_patterns=parse_string_tuple(item.get("skip_ir_url_patterns")),
             )
@@ -1812,6 +2327,19 @@ def parse_string_tuple(value: Any) -> tuple[str, ...]:
     return (str(value).strip(),) if str(value).strip() else ()
 
 
+def parse_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(value)
+
+
 def collect_earnings_symbols(watch_symbols: list[WatchSymbol]) -> list[str]:
     symbols: list[str] = []
     seen: set[str] = set()
@@ -1847,12 +2375,18 @@ def load_earnings_rows(
         wanted = set(symbols)
         return [row for row in data if isinstance(row, dict) and str(row.get("symbol", "")).upper() in wanted]
 
-    provider = str(config.get("earnings", {}).get("provider", "fmp")).lower()
-    if provider != "fmp":
+    earnings_config = config.get("earnings", {})
+    provider = str(earnings_config.get("provider", "auto")).lower()
+    require_provider = bool(earnings_config.get("require_provider", False))
+    if provider in ("official_ir", "free", "none"):
+        return []
+    if provider not in ("auto", "fmp"):
         raise ValueError(f"Unsupported earnings provider: {provider}")
 
     api_key = os.environ.get("FMP_API_KEY")
     if not api_key:
+        if not require_provider:
+            return []
         raise RuntimeError("FMP_API_KEY is required. Add it as a GitHub Actions secret.")
 
     query = urllib.parse.urlencode(
@@ -2009,6 +2543,8 @@ def load_official_ir_fallback_rows(
     scan_items: list[WatchSymbol] = []
     for item in watch_symbols:
         if not should_use_official_ir_fallback(item):
+            if cache.get("symbols", {}).pop(item.symbol, None) is not None:
+                cache_changed = True
             continue
         cached_rows = cached_official_ir_rows(cache, item.symbol, start_date, end_date, cache_ttl_hours)
         if cached_rows is not None:
@@ -2042,7 +2578,7 @@ def load_official_ir_fallback_rows(
 
 
 def should_use_official_ir_fallback(item: WatchSymbol) -> bool:
-    return bool(item.ir_url or item.ir_press_releases_rss)
+    return item.official_ir_fallback_enabled and bool(item.ir_url or item.ir_press_releases_rss)
 
 
 def scan_official_ir_fallback_rows(
@@ -2096,6 +2632,7 @@ def scan_official_ir_fallback_result(
                 "sessionSource": "Company official IR",
                 "source": "Company official IR fallback",
                 "confidence": "official_confirmed",
+                "matchReason": build_official_ir_match_reason(page_text, event_date, parsed, url),
             }
             row.update(parsed)
             rows.append(row)
@@ -2156,6 +2693,33 @@ def scan_official_ir_rows_parallel(
             )
         executor.shutdown(wait=False, cancel_futures=True)
     return results
+
+
+def build_official_ir_match_reason(page_text: str, event_date: dt.date, parsed: dict[str, Any], url: str) -> dict[str, Any]:
+    contexts = event_date_contexts(page_text, event_date)
+    context = re.sub(r"\s+", " ", contexts[0]).strip() if contexts else ""
+    lowered = context.lower()
+    keywords = [
+        keyword
+        for keyword in ("financial results", "earnings", "conference call", "webcast", "after market close", "before market open")
+        if keyword in lowered
+    ]
+    return {
+        "matched_date": event_date.isoformat(),
+        "matched_keywords": keywords,
+        "parsed_time": parsed.get("time"),
+        "release_time": parsed.get("releaseTime"),
+        "conference_call_time": parsed.get("conferenceCallTime"),
+        "session": parsed.get("session"),
+        "source_url": url,
+        "context_excerpt": shorten_text(context, 360),
+    }
+
+
+def shorten_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 1)].rstrip() + "..."
 
 
 def load_official_ir_cache(cache_path: Path | None) -> dict[str, Any]:
@@ -2776,6 +3340,21 @@ def earnings_row_confidence(row: dict[str, Any]) -> str:
     return "provider_confirmed"
 
 
+def earnings_row_source_score(row: dict[str, Any]) -> int:
+    confidence = earnings_row_confidence(row)
+    if confidence == "official_confirmed":
+        return 95
+    if confidence == "provider_confirmed":
+        if as_optional_str(row.get("sessionSource")) == "Nasdaq Earnings Calendar":
+            return 80
+        return 75
+    if confidence == "fallback_snapshot":
+        return 70
+    if confidence == "rule_estimated":
+        return 50
+    return 35
+
+
 def build_earnings_observation_event(
     *,
     display_symbol: str,
@@ -2986,6 +3565,9 @@ def build_earnings_description(
     if source_symbol != display_symbol:
         lines.append(f"财报查询代码: {source_symbol}")
     lines.extend([f"交易所时区: {event_timezone}", f"财报时间: {session_label}"])
+    source_score = earnings_row_source_score(row)
+    lines.append(f"来源评分: {source_score}/100")
+    lines.append(f"来源等级: {source_label_from_score(source_score)}")
 
     eps = first_existing(row, ("epsEstimated", "epsEstimate", "epsConsensus"))
     revenue = first_existing(row, ("revenueEstimated", "revenueEstimate", "revenueConsensus"))
@@ -3142,8 +3724,7 @@ def load_free_economic_events(
     events: list[CalendarEvent] = []
     try:
         events.extend(load_fed_fomc_events(start_date, end_date, timezone, reminder_days))
-    except Exception as exc:
-        warn_runtime(warnings, f"Federal Reserve FOMC calendar failed; using built-in FOMC fallback: {exc}")
+    except Exception:
         events.extend(build_known_fomc_events(start_date, end_date, timezone, reminder_days))
 
     events.extend(
@@ -3293,12 +3874,12 @@ def load_official_scheduled_macro_events(
     for category, url in BLS_SCHEDULE_URLS.items():
         try:
             rows.extend(load_bls_release_schedule(category, url))
-        except Exception as exc:
-            warn_runtime(warnings, f"BLS {category} release schedule failed; using local official snapshot: {exc}")
+        except Exception:
+            pass
     try:
         rows.extend(load_bea_release_schedule())
-    except Exception as exc:
-        warn_runtime(warnings, f"BEA release schedule failed; using local official snapshot: {exc}")
+    except Exception:
+        pass
     rows.extend(load_macro_schedule_file(schedule_file))
 
     events: list[CalendarEvent] = []
@@ -3357,7 +3938,18 @@ def load_macro_schedule_file(path: Path) -> list[dict[str, Any]]:
     rows = data.get("releases", [])
     if not isinstance(rows, list):
         raise ValueError(f"Invalid macro schedule file: {path}")
-    return [row for row in rows if isinstance(row, dict)]
+    normalized_rows: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        normalized = dict(row)
+        source_name = as_optional_str(normalized.get("source_name"))
+        if source_name and not re.search(r"\b(local|snapshot|fallback)\b", source_name, flags=re.IGNORECASE):
+            normalized["source_name"] = f"{source_name} (local official snapshot)"
+        elif not source_name:
+            normalized["source_name"] = "Local official macro snapshot"
+        normalized_rows.append(normalized)
+    return normalized_rows
 
 
 def load_bls_release_schedule(category: str, url: str) -> list[dict[str, Any]]:
@@ -4571,14 +5163,19 @@ def render_ics(name: str, description: str, events: list[CalendarEvent]) -> str:
 def render_dashboard_html(status_data: dict[str, Any], events: list[CalendarEvent]) -> str:
     sections = [
         ("概览", render_dashboard_overview(status_data)),
+        ("需要关注", render_dashboard_attention(status_data.get("attention_items", []))),
+        ("日程变化", render_dashboard_event_changes(status_data.get("event_changes", {}))),
         ("未来 7 天", render_dashboard_event_summary(status_data, days=7)),
         ("未来 30 天", render_dashboard_event_summary(status_data, days=30)),
         ("高影响事项", render_dashboard_high_impact(status_data)),
         ("事件列表", render_dashboard_events(events)),
         ("URL 校验", render_dashboard_url_validation(status_data.get("url_validation", {}))),
+        ("IR 抓取审计", render_dashboard_ir_audit(status_data.get("official_ir_cache_audit", {}))),
         ("财报覆盖", render_dashboard_json_block(status_data.get("earnings_coverage", {}))),
         ("影响分析", render_dashboard_json_block(status_data.get("portfolio_event_impact", {}))),
         ("持仓主题", render_dashboard_json_block(status_data.get("portfolio_context", {}))),
+        ("宏观快照", render_dashboard_json_block(status_data.get("macro_snapshot", {}))),
+        ("历史审计", render_dashboard_json_block(status_data.get("event_history", {}))),
         ("宏观审计", render_dashboard_json_block(status_data.get("macro_audit", []))),
     ]
     body = "".join(
@@ -4595,6 +5192,7 @@ def render_dashboard_html(status_data: dict[str, Any], events: list[CalendarEven
         "table{width:100%;border-collapse:collapse;}"
         "th,td{border-top:1px solid #e5e5e5;padding:8px 6px;text-align:left;vertical-align:top;}"
         ".tag{display:inline-block;padding:2px 6px;border:1px solid #ccc;border-radius:999px;font-size:12px;}"
+        ".severity-error{color:#a40000;font-weight:700;}.severity-warning{color:#8a5a00;font-weight:700;}.severity-info{color:#2456a6;font-weight:700;}"
         ".score-high{color:#0a6b2b;font-weight:700;}.score-mid{color:#8a5a00;font-weight:700;}.fail{color:#a40000;font-weight:700;}"
         "code,pre{background:#f6f8fa;border-radius:6px;}"
         "pre{white-space:pre-wrap;word-break:break-word;padding:12px;}"
@@ -4622,9 +5220,62 @@ def render_dashboard_overview(status_data: dict[str, Any]) -> str:
     confidence_counts = status_data.get("confidence_counts", {})
     if confidence_counts:
         items.append(f"<li>可信度: {html.escape(', '.join(f'{key}={value}' for key, value in confidence_counts.items()))}</li>")
+    source_score_counts = status_data.get("source_score_counts", {})
+    if source_score_counts:
+        items.append(f"<li>来源评分: {html.escape(', '.join(f'{key}={value}' for key, value in source_score_counts.items()))}</li>")
     if warnings:
         items.append(f"<li>警告: {html.escape(' | '.join(map(str, warnings)))}</li>")
     return "<ul>" + "".join(items) + "</ul>"
+
+
+def render_dashboard_attention(value: Any) -> str:
+    if not isinstance(value, list) or not value:
+        return "<p class=\"muted\">当前没有需要人工关注的事项。</p>"
+    rows = []
+    for item in value[:100]:
+        if not isinstance(item, dict):
+            continue
+        severity = str(item.get("severity") or "info")
+        rows.append(
+            "<tr>"
+            f"<td class=\"severity-{html.escape(severity)}\">{html.escape(severity)}</td>"
+            f"<td>{html.escape(str(item.get('area') or ''))}</td>"
+            f"<td>{html.escape(str(item.get('title') or ''))}</td>"
+            f"<td>{html.escape(str(item.get('detail') or ''))}</td>"
+            "</tr>"
+        )
+    return "<table><tr><th>级别</th><th>区域</th><th>事项</th><th>说明</th></tr>" + "".join(rows) + "</table>"
+
+
+def render_dashboard_event_changes(value: Any) -> str:
+    if not isinstance(value, dict) or not value.get("baseline_available"):
+        return "<p class=\"muted\">暂无上一次生成结果作为对比基线。</p>"
+    summary = (
+        f"<p>新增 {html.escape(str(value.get('added_count', 0)))}；"
+        f"移除 {html.escape(str(value.get('removed_count', 0)))}；"
+        f"更新 {html.escape(str(value.get('changed_count', 0)))}。</p>"
+    )
+    rows = []
+    for group_name, label in (("added", "新增"), ("removed", "移除"), ("changed", "更新")):
+        group = value.get(group_name, [])
+        if not isinstance(group, list):
+            continue
+        for item in group[:25]:
+            if not isinstance(item, dict):
+                continue
+            rows.append(
+                "<tr>"
+                f"<td>{html.escape(label)}</td>"
+                f"<td>{html.escape(str(item.get('start') or ''))}</td>"
+                f"<td>{html.escape(str(item.get('title') or ''))}</td>"
+                f"<td>{html.escape(str(item.get('confidence') or ''))}</td>"
+                f"<td>{html.escape(str(item.get('source_score') or ''))}</td>"
+                f"<td><pre>{html.escape(json.dumps(item.get('changes', {}), ensure_ascii=False, sort_keys=True))}</pre></td>"
+                "</tr>"
+            )
+    if not rows:
+        return summary + "<p class=\"muted\">没有检测到变化。</p>"
+    return summary + "<table><tr><th>类型</th><th>时间</th><th>标题</th><th>可信度</th><th>来源分</th><th>字段变化</th></tr>" + "".join(rows) + "</table>"
 
 
 def render_dashboard_event_summary(status_data: dict[str, Any], days: int) -> str:
@@ -4666,13 +5317,14 @@ def render_dashboard_summary_row(event: dict[str, Any]) -> str:
         f"<td><span class=\"tag\">{html.escape(str(event.get('category') or ''))}</span></td>"
         f"<td class=\"{score_class}\">{html.escape(str(score))}</td>"
         f"<td>{html.escape(str(event.get('confidence') or ''))}</td>"
+        f"<td>{html.escape(str(event.get('source_score') or ''))}</td>"
         f"<td>{html.escape(str(event.get('url') or ''))}</td>"
         "</tr>"
     )
 
 
 def dashboard_summary_table(rows: list[str]) -> str:
-    header = "<tr><th>时间</th><th>标题</th><th>分类</th><th>影响分</th><th>可信度</th><th>URL</th></tr>"
+    header = "<tr><th>时间</th><th>标题</th><th>分类</th><th>影响分</th><th>可信度</th><th>来源分</th><th>URL</th></tr>"
     return "<table>" + header + "".join(rows) + "</table>"
 
 
@@ -4683,6 +5335,8 @@ def render_dashboard_url_validation(value: Any) -> str:
     summary = (
         f"<p>已检查 {html.escape(str(value.get('checked', 0)))} 个 URL；"
         f"失败 {html.escape(str(len(failures) if isinstance(failures, list) else 0))} 个；"
+        f"阻挡 {html.escape(str(value.get('blocked_count', 0)))} 个；"
+        f"跳过 {html.escape(str(value.get('skipped_count', 0)))} 个；"
         f"截断: {html.escape(str(bool(value.get('truncated', False))))}</p>"
     )
     if not failures:
@@ -4700,6 +5354,42 @@ def render_dashboard_url_validation(value: Any) -> str:
             "</tr>"
         )
     return summary + "<table><tr><th>角色</th><th>事件</th><th>状态</th><th>URL</th></tr>" + "".join(rows) + "</table>"
+
+
+def render_dashboard_ir_audit(value: Any) -> str:
+    if not isinstance(value, dict) or not value.get("enabled", False):
+        return "<p class=\"muted\">IR 抓取审计未启用。</p>"
+    symbols = value.get("symbols", [])
+    if not isinstance(symbols, list):
+        return "<p class=\"muted\">IR 抓取审计格式异常。</p>"
+    problem_rows = [
+        item
+        for item in symbols
+        if isinstance(item, dict)
+        and (int(item.get("failure_count") or 0) > 0 or bool(item.get("truncated")))
+    ]
+    summary = (
+        f"<p>缓存 symbol {html.escape(str(len(symbols)))} 个；"
+        f"有失败/截断 {html.escape(str(len(problem_rows)))} 个。</p>"
+    )
+    if not problem_rows:
+        return summary
+    rows = []
+    for item in problem_rows[:80]:
+        failures = item.get("failures", [])
+        first_failure = failures[0] if isinstance(failures, list) and failures and isinstance(failures[0], dict) else {}
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(item.get('symbol') or ''))}</td>"
+            f"<td>{html.escape(str(item.get('cached_event_rows') or 0))}</td>"
+            f"<td>{html.escape(str(item.get('failure_count') or 0))}</td>"
+            f"<td>{html.escape(str(bool(item.get('truncated'))))}</td>"
+            f"<td>{html.escape(str(first_failure.get('error') or ''))}</td>"
+            f"<td>{html.escape(str(first_failure.get('url') or ''))}</td>"
+            "</tr>"
+        )
+    header = "<tr><th>Symbol</th><th>命中行</th><th>失败数</th><th>截断</th><th>首个错误</th><th>URL</th></tr>"
+    return summary + "<table>" + header + "".join(rows) + "</table>"
 
 
 def render_dashboard_events(events: list[CalendarEvent]) -> str:
