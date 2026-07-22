@@ -14,6 +14,7 @@ from scripts.generate_calendar import (
     build_krx_market_holiday_events,
     build_us_market_holiday_events,
     extract_candidate_earnings_dates,
+    enrich_earnings_rows_with_nasdaq,
     format_revenue_estimate,
     load_auto_financial_events,
     load_free_economic_events,
@@ -225,6 +226,59 @@ class GenerateCalendarTests(unittest.TestCase):
         self.assertEqual("Europe/London", events[0].timezone)
         self.assertEqual(dt.time(5, 0), events[0].start.time())
         self.assertIn("官方财报页面: https://www.hsbc.com/investors/results-and-announcements", events[0].description)
+
+    def test_nasdaq_enrichment_adds_missing_watchlist_earnings_rows(self):
+        watch_symbols = [WatchSymbol(symbol="GOOG", name="Alphabet", tradingview="NASDAQ:GOOG")]
+
+        def fake_load_nasdaq_rows(event_date):
+            if event_date != dt.date(2026, 7, 22):
+                return []
+            return [
+                {
+                    "symbol": "GOOG",
+                    "name": "Alphabet Inc.",
+                    "time": "time-after-hours",
+                    "epsForecast": "$2.87",
+                },
+                {
+                    "symbol": "GOOGL",
+                    "name": "Alphabet Inc.",
+                    "time": "time-after-hours",
+                    "epsForecast": "$2.87",
+                },
+                {
+                    "symbol": "NOTWATCHED",
+                    "name": "Not Watched Corp.",
+                    "time": "time-after-hours",
+                },
+            ]
+
+        with patch("scripts.generate_calendar.load_nasdaq_earnings_rows", side_effect=fake_load_nasdaq_rows):
+            rows = enrich_earnings_rows_with_nasdaq(
+                [],
+                watch_symbols=watch_symbols,
+                start_date=dt.date(2026, 7, 22),
+                end_date=dt.date(2026, 7, 22),
+                timezone="America/New_York",
+            )
+
+        self.assertEqual(1, len(rows))
+        self.assertEqual("GOOG", rows[0]["symbol"])
+        self.assertEqual("Nasdaq Earnings Calendar", rows[0]["sessionSource"])
+
+        events = build_earnings_events(
+            rows=rows,
+            watch_symbols=watch_symbols,
+            timezone="America/New_York",
+            reminder_days=1,
+            timed_event_minutes=30,
+            links_config={},
+        )
+
+        self.assertEqual(1, len(events))
+        self.assertEqual("Alphabet Inc. (GOOG) 财报 - 盘后", events[0].title)
+        self.assertEqual(dt.time(16, 5), events[0].start.time())
+        self.assertIn("EPS 预期: $2.87", events[0].description)
 
     def test_extract_candidate_earnings_dates_accepts_uk_dates(self):
         text = "1Q 2026 Earnings Release 05 May 2026. Another date is 2026-06-30."

@@ -285,7 +285,13 @@ def main() -> int:
         earnings_rows = []
     nasdaq_enrichment_enabled = config.get("earnings", {}).get("enrichment", {}).get("nasdaq", {}).get("enabled", False)
     if nasdaq_enrichment_enabled:
-        earnings_rows = enrich_earnings_rows_with_nasdaq(earnings_rows, timezone)
+        earnings_rows = enrich_earnings_rows_with_nasdaq(
+            earnings_rows,
+            watch_symbols=watch_symbols,
+            start_date=today,
+            end_date=end_date,
+            timezone=timezone,
+        )
     earnings_rows = enrich_earnings_rows_with_official_ir(earnings_rows, watch_symbols, timezone)
     if not args.fixture:
         earnings_rows = merge_missing_official_ir_rows(
@@ -635,12 +641,22 @@ def load_earnings_rows(
     return [row for row in data if str(row.get("symbol", "")).upper() in wanted]
 
 
-def enrich_earnings_rows_with_nasdaq(rows: list[dict[str, Any]], timezone: str) -> list[dict[str, Any]]:
+def enrich_earnings_rows_with_nasdaq(
+    rows: list[dict[str, Any]],
+    *,
+    watch_symbols: list[WatchSymbol],
+    start_date: dt.date,
+    end_date: dt.date,
+    timezone: str,
+) -> list[dict[str, Any]]:
     dates: set[dt.date] = set()
     for row in rows:
         event_date, _ = parse_earnings_datetime(row, timezone)
         if event_date is not None:
             dates.add(event_date)
+    day_count = (end_date - start_date).days + 1
+    for offset in range(max(day_count, 0)):
+        dates.add(start_date + dt.timedelta(days=offset))
 
     nasdaq_rows_by_date: dict[dt.date, list[dict[str, Any]]] = {}
     for event_date in sorted(dates):
@@ -649,7 +665,13 @@ def enrich_earnings_rows_with_nasdaq(rows: list[dict[str, Any]], timezone: str) 
         except Exception as exc:
             print(f"WARNING: Nasdaq earnings enrichment failed for {event_date}: {exc}", file=sys.stderr)
 
-    return apply_nasdaq_enrichment(rows, nasdaq_rows_by_date, timezone)
+    enriched = apply_nasdaq_enrichment(rows, nasdaq_rows_by_date, timezone)
+    return merge_missing_nasdaq_rows(
+        enriched,
+        nasdaq_rows_by_date,
+        watch_symbols=watch_symbols,
+        default_timezone=timezone,
+    )
 
 
 def load_nasdaq_earnings_rows(event_date: dt.date) -> list[dict[str, Any]]:
@@ -692,6 +714,70 @@ def apply_nasdaq_enrichment(
             updated["companyName"] = as_optional_str(nasdaq_row.get("name"))
         enriched.append(updated)
     return enriched
+
+
+def merge_missing_nasdaq_rows(
+    rows: list[dict[str, Any]],
+    nasdaq_rows_by_date: dict[dt.date, list[dict[str, Any]]],
+    *,
+    watch_symbols: list[WatchSymbol],
+    default_timezone: str,
+) -> list[dict[str, Any]]:
+    existing_keys: set[tuple[str, dt.date]] = set()
+    watch_lookup = build_watch_symbol_lookup(watch_symbols)
+    for row in rows:
+        source_symbol = str(row.get("symbol", "")).strip().upper()
+        watch_item = watch_lookup.get(source_symbol)
+        if not watch_item:
+            continue
+        event_date, _ = parse_earnings_datetime(row, earnings_timezone(watch_item, default_timezone))
+        if event_date:
+            existing_keys.add((watch_item.symbol, event_date))
+
+    merged = list(rows)
+    for event_date, nasdaq_rows in sorted(nasdaq_rows_by_date.items()):
+        for nasdaq_row in nasdaq_rows:
+            source_symbol = str(nasdaq_row.get("symbol", "")).strip().upper()
+            watch_item = watch_lookup.get(source_symbol)
+            if not watch_item:
+                continue
+            key = (watch_item.symbol, event_date)
+            if key in existing_keys:
+                continue
+            normalized = normalize_nasdaq_earnings_row(nasdaq_row, event_date)
+            if normalized is None:
+                continue
+            existing_keys.add(key)
+            merged.append(normalized)
+    return merged
+
+
+def normalize_nasdaq_earnings_row(row: dict[str, Any], event_date: dt.date) -> dict[str, Any] | None:
+    symbol = as_optional_str(row.get("symbol"))
+    if not symbol:
+        return None
+    normalized: dict[str, Any] = {
+        "symbol": symbol.upper(),
+        "date": event_date.isoformat(),
+        "source": "Nasdaq Earnings Calendar",
+        "sessionSource": "Nasdaq Earnings Calendar",
+        "confidence": "nasdaq-calendar",
+        "url": "https://www.nasdaq.com/market-activity/earnings",
+    }
+    field_map = {
+        "name": "companyName",
+        "time": "time",
+        "epsForecast": "epsEstimated",
+        "fiscalQuarterEnding": "fiscalQuarterEnding",
+        "noOfEsts": "noOfEsts",
+        "lastYearRptDt": "lastYearRptDt",
+        "lastYearEPS": "lastYearEPS",
+    }
+    for source_key, target_key in field_map.items():
+        value = row.get(source_key)
+        if value not in (None, ""):
+            normalized[target_key] = value
+    return normalized
 
 
 def find_nasdaq_row(rows: list[dict[str, Any]], symbol: str) -> dict[str, Any] | None:
